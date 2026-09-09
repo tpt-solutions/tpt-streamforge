@@ -1,0 +1,291 @@
+# Design Specification: `tpt-streamforge`
+
+**Status:** Draft / RFC  
+**Project:** `tpt-streamforge` (The Zero-Copy Streaming ETL Engine)  
+**Ecosystem:** TPT Solutions  
+**License:** Dual-licensed MIT / Apache-2.0  
+**Date:** September 2026  
+
+---
+
+## 1. Executive Summary
+
+`tpt-streamforge` is a blazing-fast, memory-efficient, streaming-first ETL (Extract, Transform, Load) engine written in pure Rust with a **minimal dependency philosophy**.
+
+Currently, data engineers and backend developers face a painful choice when processing large files (CSV, JSON):
+- **Python/Pandas:** Loads entire files into RAM. Crashes on files > available memory.
+- **Node.js Streams:** Memory-efficient but painfully slow for complex transformations.
+- **Polars/DuckDB:** Excellent for analytics, but carry heavy dependency trees and copyleft licensing risks.
+
+`tpt-streamforge` solves this by providing a streaming pipeline engine that processes files in fixed-size chunks, keeping memory usage constant regardless of file size. It uses a custom, minimal columnar data format (inspired by Arrow but implemented from scratch) to enable zero-copy data exchange with Python and JavaScript.
+
+**Key differentiator:** We reject heavy, complex dependencies (like `parquet`, `wasmtime`) even if they're permissively licensed. If a good, minimal alternative doesn't exist, we build our own replacement.
+
+## 2. Core Design Principles
+
+1. **Strict MIT / Apache-2.0 Licensing:** All code is dual-licensed MIT / Apache-2.0. All dependencies are audited via `cargo-deny`. Any dependency (direct or transitive) carrying a copyleft license (GPL, LGPL, AGPL, SSPL, MPL with copyleft provisions) is strictly rejected.
+2. **Minimal Dependency Tree:** We avoid heavy, complex dependencies (e.g., `parquet`, `wasmtime`). If a good, minimal alternative doesn't exist, we build our own replacement. The goal is to keep the dependency tree small, auditable, and free of licensing ambiguity.
+3. **Constant Memory Footprint:** Memory usage is bounded by the chunk size (default 64MB), not the file size. A 500GB CSV can be processed on a laptop with 8GB RAM.
+4. **Zero-Copy Data Exchange:** Uses a custom columnar data format (inspired by Arrow IPC) to share memory between Rust, Python, and JavaScript without serialization overhead.
+5. **Streaming-First, Not Batch-First:** Designed for row-by-row transformations, filters, and aggregations. Not a DataFrame library.
+6. **Rust-Only Extensibility:** Custom transformations are written as Rust closures. No WASM plugin system (to avoid `wasmtime` dependency). Cross-language extensibility is achieved via the FFI boundary, not runtime plugins.
+7. **Multi-Language Native:** Pure Rust core with clean C ABI. Wrappers for Python, JavaScript, and C/C++.
+
+---
+
+## 3. Licensing Strategy & Dependency Audit
+
+### 3.1 License Model
+
+`tpt-streamforge` is dual-licensed under **MIT** and **Apache-2.0**, at the user's option.
+
+### 3.2 Dependency Audit Pipeline
+
+All dependency licensing is enforced automatically via `cargo-deny` in CI:
+
+```toml
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+]
+
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+    "AGPL-3.0",
+    "SSPL-1.0",
+    "EUPL-1.1",
+    "EUPL-1.2",
+    "MPL-2.0",  # Blocked to avoid weak copyleft
+]
+
+unlicensed = "deny"
+copyleft = "deny"
+3.3 Rejected Dependencies & Replacements
+Rejected Dependency
+Reason
+Replacement Strategy
+parquet
+Apache-2.0, but complex and heavy. Transitive dependency tree is large.
+Drop Parquet support. Use custom columnar format (see §5.2).
+wasmtime
+Apache-2.0 with LLVM exception, but complex and heavy.
+Drop WASM plugin system. Use Rust closures only.
+arrow (full crate)
+Apache-2.0, but pulls in many transitive dependencies.
+Build minimal columnar format from scratch (see §5.2).
+datafusion
+Apache-2.0, but massive dependency tree.
+Do not use. Build custom streaming engine.
+polars
+MPL-2.0 (weak copyleft).
+Do not use. Build custom streaming engine.
+openssl / openssl-sys
+Complex license.
+Use rustls (Apache-2.0 / MIT) for TLS.
+3.4 Approved Dependencies (Minimal Set)
+Dependency
+Purpose
+License
+Status
+csv
+CSV parsing
+MIT / Unlicense
+✅ Approved
+serde / serde_json
+Serialization
+MIT / Apache-2.0
+✅ Approved
+tokio
+Async runtime
+MIT
+✅ Approved
+pyo3
+Python bindings
+MIT / Apache-2.0
+✅ Approved
+wasm-bindgen
+WASM bindings
+MIT / Apache-2.0
+✅ Approved
+rusqlite
+SQLite bindings (optional)
+MIT
+✅ Approved
+zstd
+Compression
+BSD-3-Clause
+✅ Approved
+rayon
+Parallelism
+MIT / Apache-2.0
+✅ Approved
+4. Architecture Overview
+
+tpt-streamforge/
+├── Cargo.toml             # Workspace root with shared deny.toml
+├── deny.toml              # cargo-deny configuration
+├── LICENSE-MIT
+├── LICENSE-APACHE
+├── tpt-stream-core/       # Pure Rust. Parsers, columnar pipeline, transformations.
+├── tpt-stream-columnar/   # Custom minimal columnar format (replaces Arrow/Parquet).
+├── tpt-stream-ffi/        # C ABI boundary. Opaque handles, error codes.
+├── tpt-stream-py/         # PyO3 wrapper. Generates the `tpt-streamforge` Python wheel.
+├── tpt-stream-wasm/       # wasm-bindgen wrapper. Generates the JS/WASM package.
+└── tests/                 # Integration tests across all language boundaries.
+
+4.1 The Streaming Pipeline Architecture
+
+┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌─────────────┐
+│  Source     │────▶│  Transform   │────▶│  Transform   │────▶│  Sink       │
+│  (Reader)   │     │  Stage 1     │     │  Stage 2     │     │  (Writer)   │
+└─────────────┘     └──────────────┘     └──────────────┘     └─────────────┘
+      │                    │                    │                    │
+      ▼                    ▼                    ▼                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Custom Columnar RecordBatch (Zero-Copy, Fixed-Size Chunks)                 │
+│  [64 rows × 10 columns] → [64 rows × 10 columns] → ... → [64 rows × 10 cols]│
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5. Key Components & Implementation Details
+5.1 Streaming Parsers (Sources)
+CSV: Uses csv crate (MIT/Unlicense) with streaming reader.
+JSON/JSONL: Uses serde_json (MIT/Apache-2.0) with streaming deserializer.
+Custom Columnar Format: Native format for intermediate storage (see §5.2).
+5.2 Custom Columnar Format (tpt-stream-columnar)
+Since we're rejecting arrow and parquet, we need to build our own minimal columnar data format. This is a significant undertaking, but it gives us absolute control over the dependency tree.
+Design Goals:
+Simple: Easier to implement and audit than Arrow/Parquet.
+Efficient: Columnar layout for fast filtering and aggregation.
+Zero-Copy FFI: Can be shared with Python/JS via raw pointers.
+Streaming-Friendly: Fixed-size chunks (default 64MB) for constant memory usage.
+Implementation Plan:
+Phase 1: Build a basic columnar format supporting primitive types (Int32, Int64, Float32, Float64, Utf8).
+Phase 2: Add support for nested types (List, Struct) if needed.
+Phase 3: Implement serialization/deserialization for disk storage.
+Phase 4: Implement zero-copy FFI for Python/JS integration.
+Trade-offs:
+Pros: Minimal dependencies, full control, no licensing ambiguity.
+Cons: Significant development effort, less feature-rich than Arrow/Parquet.
+5.3 Transformation Engine
+Built-in transformations (executed in Rust for speed):
+Filter: WHERE age > 18 AND status = 'active'
+Map: Add/modify columns (e.g., full_name = first_name + ' ' + last_name)
+Aggregate: Streaming GROUP BY with SUM, AVG, COUNT, MIN, MAX
+Deduplicate: Remove duplicate rows based on key columns
+Sort: External merge sort for large datasets (uses disk if needed)
+Join: Streaming hash join for two input streams
+5.4 Extensibility (Rust Closures Only)
+Since we're dropping the WASM plugin system, custom transformations are written as Rust closures:
+
+use tpt_stream_core::pipeline::Pipeline;
+
+let pipeline = Pipeline::new()
+    .read_csv("input.csv")
+    .map(|row| {
+        row.with_column("full_name", format!("{} {}", row.get("first_name"), row.get("last_name")))
+    })
+    .write_csv("output.csv");
+
+pipeline.execute()?;
+
+For cross-language extensibility, users can:
+Write custom transformations in Rust and expose them via the FFI boundary.
+Use the Python/JS wrappers to call Rust functions.
+5.5 Sinks (Writers)
+CSV: Streaming writer with configurable delimiters and quoting.
+JSON/JSONL: Streaming JSON writer.
+Custom Columnar Format: Native format for intermediate storage.
+Database: Bulk insert into PostgreSQL or SQLite via rusqlite (MIT).
+6. Target API Design (Developer Experience)
+6.1 Python API (via PyO3)
+
+import tpt_streamforge as sf
+
+pipeline = (
+    sf.read_csv("massive_data.csv", chunk_size=65536)
+    .filter("age > 18 AND status == 'active'")
+    .map("full_name = first_name + ' ' + last_name")
+    .group_by("department")
+    .agg({"salary": "mean", "age": "max"})
+    .write_csv("output.csv")
+)
+
+pipeline.execute()
+
+6.2 JavaScript / Node.js API (via WASM)
+
+import { StreamForge } from 'tpt-streamforge-wasm';
+
+const forge = new StreamForge();
+
+const pipeline = forge
+  .readCSV('massive_data.csv')
+  .filter(row => row.age > 18 && row.status === 'active')
+  .map(row => ({ ...row, full_name: `${row.first_name} ${row.last_name}` }))
+  .writeCSV('output.csv');
+
+await pipeline.execute();
+
+7. Performance & Resource Targets
+Metric
+Target
+Rationale
+Memory Usage
+< 200 MB (constant)
+Independent of file size. Bounded by chunk size.
+Throughput (CSV)
+> 5 million rows/sec
+Faster than Pandas for streaming transformations.
+Binary Size (Native)
+< 15 MB
+Minimal dependencies = small binary.
+Binary Size (WASM)
+< 10 MB
+Fast download for browser/edge use.
+Dependency Count
+< 20 crates
+Minimal, auditable dependency tree.
+8. Phased Rollout & Milestones
+Phase 1: Core Streaming Engine (Pure Rust)
+Set up workspace with deny.toml and CI license auditing.
+Implement streaming CSV reader/writer.
+Implement basic transformations: filter, map, select.
+Implement streaming JSON/JSONL reader/writer.
+Verify full dependency tree passes cargo deny check licenses.
+Phase 2: Custom Columnar Format
+Design and implement tpt-stream-columnar crate.
+Support primitive types (Int32, Int64, Float32, Float64, Utf8).
+Implement fixed-size chunking for streaming.
+Implement serialization/deserialization for disk storage.
+Phase 3: Advanced Transformations
+Implement streaming aggregations (GROUP BY with SUM, AVG, etc.).
+Implement external merge sort for large datasets.
+Implement streaming hash join.
+Implement deduplication.
+Phase 4: FFI & Python Wrapper
+Build tpt-stream-ffi with C ABI.
+Build tpt-stream-py using PyO3.
+Set up GitHub Actions to build and publish wheels to PyPI.
+Phase 5: JavaScript Wrapper
+Build tpt-stream-wasm using wasm-bindgen.
+Implement Node.js-specific file I/O.
+Publish to npm.
+Phase 6: Advanced Features
+Add support for reading from/writing to databases (PostgreSQL, SQLite).
+Add support for cloud storage (S3, GCS, Azure Blob) using rustls.
+Add telemetry and profiling hooks.
+9. Open Questions & Risks
+Custom Columnar Format Complexity: Building a columnar format from scratch is a significant undertaking. Mitigation: Start with a minimal implementation supporting only primitive types. Add nested types only if needed.
+Performance vs. Arrow/Parquet: Our custom format may be slower or less feature-rich than Arrow/Parquet. Mitigation: Focus on streaming performance and memory efficiency, not feature parity. Document trade-offs clearly.
+Transitive Dependency Drift: A currently permissive dependency could add a copyleft transitive dependency in a future version. Mitigation: cargo-deny runs on every PR and every release tag. Pin dependency versions in Cargo.lock.
+No WASM Plugins: Users may want to write plugins in languages other than Rust. Mitigation: Clearly document that custom transformations must be written in Rust. Provide examples and documentation for FFI-based extensibility.
+No Parquet Support: Users may expect Parquet support for interoperability with the broader data ecosystem. Mitigation: Clearly document that Parquet is not supported. Provide migration guides for users who need Parquet.
