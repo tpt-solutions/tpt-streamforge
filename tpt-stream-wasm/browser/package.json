@@ -1,0 +1,37 @@
+{
+  "name": "tpt-streamforge-browser",
+  "version": "0.1.0",
+  "description": "In-memory streaming ETL for the browser, backed by the tpt-streamforge WASM engine",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpt-solutions/tpt-streamforge"
+  },
+  "main": "index.js",
+  "module": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "pkg/tpt_stream_wasm.js",
+    "pkg/tpt_stream_wasm_bg.js",
+    "pkg/tpt_stream_wasm_bg.wasm",
+    "pkg/tpt_stream_wasm.d.ts"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "wasm-pack build --target bundler --out-dir pkg ..",
+    "test": "webpack --config tests/webpack.config.mjs && node tests/dist/bundle.cjs"
+  },
+  "devDependencies": {
+    "webpack": "^5.95.0",
+    "webpack-cli": "^5.1.4"
+  }
+}

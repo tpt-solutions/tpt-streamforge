@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "tpt-stream-core",
+    "tpt-stream-columnar",
+    "tpt-stream-ffi",
+    "tpt-stream-py",
+    "tpt-stream-wasm",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tpt-solutions/tpt-streamforge"
+
+[workspace.dependencies]
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io-util"] }
+async-trait = "0.1"
+anyhow = "1"
+zstd = "0.13"
+rayon = "1"
+thiserror = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+futures-util = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

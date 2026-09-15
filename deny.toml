@@ -1,0 +1,35 @@
+# Deny-by-default: any license not in the allow list is rejected, which keeps
+# the copyleft families (GPL, AGPL, LGPL, MPL, SSPL, EUPL) out without listing
+# them explicitly (cargo-deny >= 0.18 removed the explicit deny list).
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    # Permissive, non-copyleft: pulled in by url -> icu_* (IDNA) and
+    # ureq/rustls -> webpki-roots (Mozilla root store data).
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+
+# cbindgen is a build-time tool (generates the C header for tpt-stream-ffi);
+# its MPL-2.0 code never ships in any artifact.
+[[licenses.exceptions]]
+allow = ["MPL-2.0"]
+name = "cbindgen"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[advisories]
+yanked = "deny"

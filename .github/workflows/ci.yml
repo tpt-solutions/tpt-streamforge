@@ -1,0 +1,199 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: Build and test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-features
+      - name: Test
+        run: cargo test --workspace --all-features
+      - name: C ABI integration test
+        if: runner.os != 'Windows'
+        run: cargo test -p tpt-stream-ffi --test c_integration -- --ignored
+
+  python:
+    name: Python (maturin)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          manifest-path: tpt-stream-py/Cargo.toml
+          args: --release --out dist
+      - name: Run pytest
+        shell: bash
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --quiet pytest
+          python -m pip install --quiet dist/tpt_streamforge-*.whl
+          python -m pytest tpt-stream-py/python/tests -q
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: dist/*.whl
+
+  postgres-integration:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: streamforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test -p tpt-stream-core --features postgres --test postgres
+        env:
+          TPT_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+
+  cloud-integration:
+    name: Cloud storage integration (LocalStack + Azurite)
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack:latest
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3
+        options: >-
+          --health-cmd "curl -f http://localhost:4566/_localstack/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      azurite:
+        image: mcr.microsoft.com/azure-storage/azurite:latest
+        ports:
+          - 10000:10000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Wait for Azurite
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/10000) 2>/dev/null; then
+              echo "azurite is up"
+              break
+            fi
+            sleep 1
+          done
+      - name: Create buckets/containers
+        run: |
+          pip install awscli-local azure-storage-blob
+          awslocal s3 mb s3://tpt-test
+          python - <<'EOF'
+          from azure.storage.blob import BlobServiceClient
+          svc = BlobServiceClient("http://127.0.0.1:10000/devstoreaccount1", credential="Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==")
+          svc.create_container("tpt-test")
+          EOF
+      - name: Test
+        run: cargo test -p tpt-stream-core --features "s3,gcs,azure" --test cloud
+        env:
+          TPT_TEST_S3_ENDPOINT: http://127.0.0.1:4566
+          TPT_TEST_S3_BUCKET: tpt-test
+          TPT_TEST_AZURE_ENDPOINT: http://127.0.0.1:10000/devstoreaccount1
+          TPT_TEST_AZURE_CONTAINER: tpt-test
+
+  deny:
+    name: cargo-deny check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        checks:
+          - advisories
+          - bans licenses sources
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint
+        run: cargo clippy --workspace --all-features -- -D warnings
+
+  js:
+    name: JS/WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build Node wasm package
+        run: wasm-pack build --target nodejs --out-dir node/pkg
+        working-directory: tpt-stream-wasm
+      - name: Build browser wasm package
+        run: wasm-pack build --target bundler --out-dir browser/pkg
+        working-directory: tpt-stream-wasm
+      - name: Test Node wrapper
+        run: npm test
+        working-directory: tpt-stream-wasm/node
+      - name: Test browser wrapper (webpack harness)
+        run: npm ci && npm test
+        working-directory: tpt-stream-wasm/browser

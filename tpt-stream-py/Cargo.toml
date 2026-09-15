@@ -1,0 +1,16 @@
+[package]
+name = "tpt-streamforge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python wrapper for tpt-streamforge via PyO3"
+
+[lib]
+name = "tpt_streamforge"
+crate-type = ["cdylib"]
+
+[dependencies]
+tpt-stream-core = { path = "../tpt-stream-core", version = "0.1.0" }
+tokio = { workspace = true }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }

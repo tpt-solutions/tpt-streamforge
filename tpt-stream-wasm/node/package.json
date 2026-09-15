@@ -1,0 +1,26 @@
+{
+  "name": "tpt-streamforge-node",
+  "version": "0.1.0",
+  "description": "In-memory streaming ETL for Node.js, backed by the tpt-streamforge WASM engine",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpt-solutions/tpt-streamforge"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "pkg/tpt_stream_wasm.js",
+    "pkg/tpt_stream_wasm_bg.wasm",
+    "pkg/tpt_stream_wasm.d.ts"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "wasm-pack build --target nodejs --out-dir pkg ..",
+    "test": "node --test tests/*.test.js"
+  }
+}

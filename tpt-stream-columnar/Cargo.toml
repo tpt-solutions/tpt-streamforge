@@ -1,0 +1,15 @@
+[package]
+name = "tpt-stream-columnar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Custom minimal columnar data format for tpt-streamforge"
+
+[dependencies]
+thiserror.workspace = true
+zstd = { workspace = true, optional = true }
+
+[features]
+default = []
+zstd = ["dep:zstd"]

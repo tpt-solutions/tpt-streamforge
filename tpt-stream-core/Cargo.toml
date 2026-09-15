@@ -1,0 +1,62 @@
+[package]
+name = "tpt-stream-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core streaming ETL pipeline engine for tpt-streamforge"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+csv.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+thiserror.workspace = true
+tpt-stream-columnar = { path = "../tpt-stream-columnar", version = "0.1.0" }
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype"], optional = true }
+tokio-postgres = { version = "0.7", optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { workspace = true, optional = true }
+# Cloud object storage (feature `s3`, also used by `gcs`): rusty-s3 is a
+# sans-IO SigV4 signer (BSD-2-Clause); ureq (rustls TLS) does the HTTP.
+rusty-s3 = { version = "0.7", optional = true }
+url = { version = "2", optional = true }
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs"], optional = true }
+# Azure Blob Shared Key signing (feature `azure`).
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+
+[features]
+default = ["async"]
+# Async streaming sources/stages and the Pipeline runtime (tokio). WASM
+# consumers disable default features to get a sync-only, std-only build.
+async = ["dep:tokio", "dep:async-trait", "dep:rayon"]
+zstd = ["tpt-stream-columnar/zstd"]
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:tokio-postgres", "dep:futures-util", "dep:bytes"]
+s3 = ["async", "dep:rusty-s3", "dep:url", "dep:ureq"]
+# GCS via the S3-compatible XML API (HMAC keys), same signer + HTTP stack.
+gcs = ["s3"]
+azure = ["async", "dep:hmac", "dep:sha2", "dep:base64", "dep:url", "dep:ureq"]
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3"
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "phase3"
+harness = false
+
+[[bench]]
+name = "stages"
+harness = false

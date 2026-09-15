@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tpt-streamforge"
+version = "0.1.0"
+description = "Streaming ETL engine for CSV/JSON to CSV/JSON with filter, map, aggregate, sort, join, and dedup — byte-at-a-time, low memory"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+keywords = ["etl", "csv", "streaming", "data", "pipeline"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "tpt_streamforge._native"
+features = ["pyo3/extension-module"]
