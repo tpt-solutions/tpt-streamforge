@@ -11,6 +11,13 @@ loading whole datasets into memory.
   (`tpt-stream-core`) — external merge sort, bloom+exact-set dedup, hash-group
   aggregation, join, zstd compression, and an expression language for
   filters/maps.
+- **Native columnar format** (`tpt-stream-columnar`) — `.tptcol` files as a
+  source and sink, with optional zstd-compressed column buffers.
+- **Pipeline introspection** — `explain()` returns the stage plan and
+  `preview(n)` runs just enough of the pipeline to return the first `n` rows,
+  in Rust, Python, and the CLI.
+- **Data quality** — an `Expect` stage for row-count bounds, no-nulls, and
+  unique-key checks, plus per-source `on_error` policies.
 - **PostgreSQL** (`postgres` feature) — `COPY`-based bulk-load sink and a
   chunked SELECT source.
 - **SQLite** (`sqlite` feature) — bulk-insert sink and a chunked SELECT source.
@@ -26,7 +33,8 @@ loading whole datasets into memory.
 - **Telemetry** — progress callbacks and per-stage row/elapsed stats in Rust,
   Python (`on_progress`/`stage_stats`), and JavaScript (`onProgress`).
 - **Python** (`tpt-stream-py`) — a `Pipeline` object via PyO3, published to
-  PyPI as `tpt-streamforge`.
+  PyPI as `tpt-streamforge`, with `to_arrow()` / `to_pandas()` output via
+  arrow-rs.
 - **JavaScript / WASM** (`tpt-stream-wasm`) — an in-memory `Engine` and fluent
   wrappers for Node (`tpt-streamforge-node`) and browsers
   (`tpt-streamforge-browser`), compiled with wasm-bindgen/wasm-pack.
@@ -95,6 +103,13 @@ tptforge preview data.csv -n 20   # first rows
 See [tpt-stream-cli/README.md](tpt-stream-cli/README.md) for the full YAML
 reference, or start from the annotated template in
 [templates/pipeline-starter](templates/pipeline-starter).
+
+### Docker
+
+```sh
+docker build -t tptforge .
+docker run --rm -v "$PWD:/data" tptforge run pipeline.yaml
+```
 
 ### Rust
 
@@ -172,7 +187,11 @@ and CSV→CSV numbers above.
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Phases and status live in
-[todo.md](todo.md).
+[todo.md](todo.md). Common recipes (`fmt`, `test`, `clippy`, `deny`, `bench`,
+`ci`, and the Python/wasm builds) are in the [justfile](justfile) — run
+`just` to list them. More end-to-end examples live in
+[tpt-stream-core/examples](tpt-stream-core/examples) (CSV→JSONL, dedup+sort,
+join, S3→Postgres, telemetry).
 
 ## License
 
