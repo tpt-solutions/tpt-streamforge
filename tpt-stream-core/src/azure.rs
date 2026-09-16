@@ -405,7 +405,7 @@ impl AzureBlobSource {
         let format = CloudFormat::detect(&key);
         let (reader, handle) =
             StreamingReader::spawn(move |tx: &BatchTx| match store.read_object(&key) {
-                Ok(body) => decode_object_stream(tx, body, format, chunk_rows),
+                Ok(body) => decode_object_stream(tx, body, format, chunk_rows, &Default::default()),
                 Err(e) => {
                     let _ = tx.send(Err(e));
                 }

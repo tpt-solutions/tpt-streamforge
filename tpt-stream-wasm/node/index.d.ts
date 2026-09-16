@@ -37,6 +37,10 @@ export class Pipeline {
   static fromCsv(csv: string, chunkRows?: number): Pipeline;
   /** Read a CSV file from disk. */
   static readFile(path: string, chunkRows?: number): Pipeline;
+  /** Read a JSON file (array of objects or a single object). */
+  static readJsonFile(path: string, chunkRows?: number): Pipeline;
+  /** Read a newline-delimited JSON (JSONL) file. */
+  static readJsonLinesFile(path: string, chunkRows?: number): Pipeline;
   /** Keep only rows where the expression evaluates to true. */
   filter(expr: string): this;
   /** Replace the schema: `columns[i]` is filled with `exprs[i]` per row. */
@@ -73,3 +77,5 @@ export class Pipeline {
 export { Engine };
 export declare function createPipeline(csv: string, chunkRows?: number): Pipeline;
 export declare const readCSV: typeof Pipeline.readFile;
+export declare const readJsonFile: typeof Pipeline.readJsonFile;
+export declare const readJsonLinesFile: typeof Pipeline.readJsonLinesFile;

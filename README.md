@@ -18,6 +18,11 @@ loading whole datasets into memory.
   Cloud Storage via the S3 XML API + HMAC keys (`gcs`), and Azure Blob with
   Shared Key auth (`azure`); multipart/block streaming uploads, no cloud SDK
   dependency.
+- **CLI** (`tpt-stream-cli`) — `tptforge run pipeline.yaml` runs streaming
+  ETL from a YAML file; `tptforge schema` / `tptforge preview` inspect data.
+  Dockerfile included; see [tpt-stream-cli/README.md](tpt-stream-cli/README.md).
+- **Robust inputs** — gzip (`csv.gz`), plain HTTP(S) URLs, and error
+  policies (`strict` / `skip` / `quarantine:bad.csv`) for malformed rows.
 - **Telemetry** — progress callbacks and per-stage row/elapsed stats in Rust,
   Python (`on_progress`/`stage_stats`), and JavaScript (`onProgress`).
 - **Python** (`tpt-stream-py`) — a `Pipeline` object via PyO3, published to
@@ -37,6 +42,8 @@ loading whole datasets into memory.
 | `tpt-stream-py` | Python | `pip install tpt-streamforge` |
 | `tpt-stream-wasm/node` | Node.js | `npm install tpt-streamforge-node` |
 | `tpt-stream-wasm/browser` | Browser | `npm install tpt-streamforge-browser` |
+| `tpt-stream-cli` | Rust | `tptforge` CLI; `cargo install --path tpt-stream-cli` |
+| `templates/pipeline-starter` | YAML | copy-paste template for new pipelines |
 
 ## Quick start
 
@@ -76,6 +83,18 @@ import { Pipeline } from 'tpt-streamforge-browser';
 const p = await Pipeline.fromFile(file);
 const csv = p.filter('amount > 10').toCSV();
 ```
+
+### CLI (no code required)
+
+```sh
+tptforge run pipeline.yaml        # YAML: source -> stages -> sink
+tptforge schema data.csv.gz       # inferred column types
+tptforge preview data.csv -n 20   # first rows
+```
+
+See [tpt-stream-cli/README.md](tpt-stream-cli/README.md) for the full YAML
+reference, or start from the annotated template in
+[templates/pipeline-starter](templates/pipeline-starter).
 
 ### Rust
 

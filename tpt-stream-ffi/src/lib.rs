@@ -63,6 +63,7 @@ fn error_code(err: &tpt_stream_core::Error) -> c_int {
         E::Other(_) => TPT_ERR_EXEC,
         E::Database(_) => TPT_ERR_EXEC,
         E::Cloud(_) => TPT_ERR_EXEC,
+        E::DataQuality(_) => TPT_ERR_EXEC,
     }
 }
 

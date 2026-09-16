@@ -51,6 +51,9 @@ jobs:
 
   npm:
     name: Build + publish npm packages
+    # Configure a GitHub Environment named "release" with required reviewers
+    # so publishing needs manual approval.
+    environment: release
     runs-on: ubuntu-latest
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -87,6 +90,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build-wheels
+    environment: release
     runs-on: ubuntu-latest
     permissions:
       id-token: write

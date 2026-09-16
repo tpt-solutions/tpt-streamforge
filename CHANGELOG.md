@@ -70,6 +70,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`Pipeline::with_chunk_size` now applies to file sources** — `read_csv` /
   `read_jsonl` / `read_json` previously ignored the configured chunk size and
   always used the 65,536-row default.
+- **`tptforge` CLI** (`tpt-stream-cli`) — `tptforge run pipeline.yaml`
+  executes streaming pipelines from a YAML file (sources/sinks: CSV, JSONL,
+  JSON, `.tptcol`, `.gz`, HTTP(S), SQLite, PostgreSQL, S3, GCS, Azure;
+  stages: filter, map, select, aggregate, sort, dedup, join, expect) with a
+  telemetry-driven progress bar, plus `tptforge schema FILE` and
+  `tptforge preview FILE -n N` for data inspection. Ships with a Dockerfile
+  and a CI image-build job.
+- **Input tolerance & gzip** — `.csv.gz`/`.jsonl.gz` decompress transparently
+  (`gzip` feature); plain HTTP(S) URLs stream as sources (`http` feature);
+  `Pipeline::on_error` selects the malformed-row policy (`strict`, `skip`,
+  or `quarantine:<path>` capturing dropped rows).
+- **Data-quality checks** — `Pipeline::expect_checks` (and YAML `expect`
+  stages) enforce row-count bounds, no-nulls, and stream-wide uniqueness;
+  violations abort with `Error::DataQuality`.
+- **`Pipeline::explain()` / `preview(n)` / `collect()`** — stage plan,
+  first-rows inspection, and in-memory collection.
+- **Python: full engine surface** — `.select`, `.join_csv`, `.read_jsonl`,
+  `.read_json`, `.read_columnar`, `.write_jsonl`, `.write_json`,
+  `.write_columnar`, `.read_sqlite`/`.write_sqlite`,
+  `.read_postgres`/`.write_postgres`, `.read_s3`/`.write_s3`,
+  `.read_gcs`/`.write_gcs`, `.read_azure`/`.write_azure`, `.read_http`,
+  `.on_error`, `.expect`, `.explain`, `.preview`, `.collect`,
+  `.to_arrow()`/`.to_pandas()` (via arrow-rs PyArrow FFI), plus
+  `py.allow_threads` around runs so other Python threads keep moving.
+- **Node: JSON input** — `readJsonFile(path)` / `readJsonLinesFile(path)`.
+- **Runnable examples** — csv_to_jsonl, join_two_files, dedup_sort_pipeline,
+  telemetry_progress, and an env-gated s3_to_postgres cloud ETL walkthrough;
+  plus a copy-paste `templates/pipeline-starter` and a root `justfile`.
+- **CI** — Dependabot config, a Docker image build job, and publish jobs
+  moved into a protected `release` GitHub Environment.
+
+### Fixed
+
+- **Ragged CSV rows no longer corrupt data silently** — a row with the wrong
+  field count previously shifted the column arena, mangling every following
+  row and dropping data. It now fails with a line-numbered schema error
+  (or is dropped/quarantined under the new error policies).
+- `Pipeline::execute()` on an already-run pipeline now errors clearly instead
+  of silently returning 0 rows (sources are one-shot).
+- Telemetry: `SinkBatch.total_rows` counts rows written (was source rows),
+  tail-drained rows (aggregation/sort/join output) now count toward
+  `stage_stats`, and `collect()`/`to_arrow()`/`to_pandas()` include tail rows.
+- Python `execute()` releases the GIL while the pipeline streams.
+- PostgreSQL sink retries once on connection loss and shuts down its
+  connection driver task on finish.
+- S3 sink clamps part sizes to the 5 GiB single-PUT ceiling.
 
 ### Changed
 

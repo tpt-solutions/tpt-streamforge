@@ -6,7 +6,7 @@ const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { Pipeline, createPipeline, readCSV } = require('../index.js');
+const { Pipeline, createPipeline, readCSV, readJsonFile, readJsonLinesFile } = require('../index.js');
 
 const CSV = [
   'id,name,amount,region',
@@ -128,6 +128,25 @@ test('toCSV roundtrip through readCSV file', () => {
 
 test('expression errors throw from wasm', () => {
   assert.throws(() => new Pipeline(CSV).filter('amount +'), /parse|expression|unexpected|expected/i);
+});
+
+test('readJsonFile and readJsonLinesFile build pipelines from JSON', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tpt-json-'));
+  try {
+    const jsonPath = path.join(dir, 'in.json');
+    fs.writeFileSync(jsonPath, JSON.stringify([{ id: 1, name: 'a' }, { id: 2, name: 'b' }]));
+    const p = readJsonFile(jsonPath);
+    assert.strictEqual(p.numRows(), 2);
+    assert.strictEqual(p.toCSV(), 'id,name\n1,a\n2,b\n');
+
+    const jsonlPath = path.join(dir, 'in.jsonl');
+    fs.writeFileSync(jsonlPath, '{"id":1,"name":"a"}\n{"id":2,"name":"b"}\n');
+    const p2 = readJsonLinesFile(jsonlPath);
+    assert.strictEqual(p2.numRows(), 2);
+    assert.strictEqual(p2.filter('id > 1').toCSV(), 'id,name\n2,b\n');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('onProgress fires per batch for filter and reports cumulative rows', () => {

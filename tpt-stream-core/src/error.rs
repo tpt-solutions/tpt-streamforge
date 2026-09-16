@@ -20,6 +20,8 @@ pub enum Error {
     Database(String),
     #[error("cloud storage error: {0}")]
     Cloud(String),
+    #[error("data quality: {0}")]
+    DataQuality(String),
     #[error("{0}")]
     Other(String),
 }

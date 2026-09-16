@@ -7,7 +7,7 @@ use crate::DEFAULT_CHUNK_ROWS;
 #[cfg(feature = "async")]
 use rayon::prelude::*;
 #[cfg(feature = "async")]
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 #[cfg(feature = "async")]
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -18,6 +18,39 @@ type BatchResult = std::result::Result<RecordBatch, Error>;
 /// CSV/JSON files, SQLite, PostgreSQL, cloud object storage).
 #[cfg(feature = "async")]
 pub type BatchTx = UnboundedSender<BatchResult>;
+
+/// How a source reacts to rows it cannot parse (field-count mismatches in
+/// CSV, undecodable JSONL lines). Type errors inside a well-formed row are
+/// always fatal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ErrorPolicy {
+    /// Abort with a line-numbered parse error (default).
+    #[default]
+    Strict,
+    /// Drop malformed rows and continue.
+    Skip,
+    /// Drop malformed rows and append each raw row to `path` (CSV rows as
+    /// CSV, JSONL lines verbatim) so nothing is lost silently.
+    Quarantine(String),
+}
+
+/// Open a (possibly gzip-compressed) file as a buffered reader. With the
+/// `gzip` feature, names ending in `.gz` are transparently decompressed.
+#[cfg(feature = "async")]
+pub(crate) fn open_file_buffered(path: &str) -> std::io::Result<Box<dyn BufRead + Send>> {
+    let file = std::fs::File::open(path)?;
+    #[cfg(feature = "gzip")]
+    if path.ends_with(".gz") {
+        use flate2::read::MultiGzDecoder;
+        return Ok(Box::new(std::io::BufReader::with_capacity(
+            64 * 1024,
+            MultiGzDecoder::new(file),
+        )));
+    }
+    #[cfg(not(feature = "gzip"))]
+    let _ = path;
+    Ok(Box::new(std::io::BufReader::with_capacity(64 * 1024, file)))
+}
 
 #[cfg(feature = "async")]
 #[async_trait::async_trait]
@@ -95,11 +128,16 @@ macro_rules! impl_source {
 // CSV
 // ---------------------------------------------------------------------------
 
+/// Streams a CSV file (`.gz`-compressed files are transparently decompressed
+/// with the `gzip` feature). The reader thread spawns on the first
+/// `next_batch`, so the `with_*` builders can be chained after `open`.
 #[cfg(feature = "async")]
 pub struct CsvSource {
-    reader: StreamingReader,
+    reader: Option<StreamingReader>,
     pending: Option<BatchResult>,
+    path: String,
     chunk_rows: usize,
+    policy: ErrorPolicy,
 }
 
 #[cfg(feature = "async")]
@@ -109,14 +147,12 @@ impl CsvSource {
     }
 
     pub fn open_with_chunk_size(path: impl Into<String>, chunk_rows: usize) -> Self {
-        let path = path.into();
-        let (reader, handle) =
-            StreamingReader::spawn(move |tx| csv_read_loop(tx, &path, chunk_rows));
-        let _ = handle;
         CsvSource {
-            reader,
+            reader: None,
             pending: None,
+            path: path.into(),
             chunk_rows,
+            policy: ErrorPolicy::default(),
         }
     }
 
@@ -124,25 +160,52 @@ impl CsvSource {
         self.chunk_rows = rows;
         self
     }
+
+    /// Set how malformed rows (field-count mismatches) are handled.
+    pub fn with_error_policy(mut self, policy: ErrorPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    fn spawn_reader(&mut self) -> &mut StreamingReader {
+        if self.reader.is_none() {
+            let path = self.path.clone();
+            let chunk_rows = self.chunk_rows;
+            let policy = self.policy.clone();
+            let (reader, handle) =
+                StreamingReader::spawn(move |tx| csv_read_loop(tx, &path, chunk_rows, &policy));
+            let _ = handle;
+            self.reader = Some(reader);
+        }
+        self.reader.as_mut().expect("just spawned")
+    }
 }
 
 #[cfg(feature = "async")]
-fn csv_read_loop(tx: &UnboundedSender<BatchResult>, path: &str, chunk_rows: usize) {
-    match std::fs::File::open(path) {
-        Ok(file) => csv_read_stream(tx, Box::new(std::io::BufReader::new(file)), chunk_rows),
+fn csv_read_loop(
+    tx: &UnboundedSender<BatchResult>,
+    path: &str,
+    chunk_rows: usize,
+    policy: &ErrorPolicy,
+) {
+    match open_file_buffered(path) {
+        Ok(reader) => csv_read_stream(tx, reader, chunk_rows, policy),
         Err(e) => {
             let _ = tx.send(Err(Error::Io(e)));
         }
     }
 }
 
-/// Stream-parse CSV from any reader (file or cloud object body) into the
-/// channel, `chunk_rows` rows per batch.
+/// Stream-parse CSV from any reader (file, cloud object body, HTTP body)
+/// into the channel, `chunk_rows` rows per batch. Ragged rows (fewer or
+/// more fields than the header) are fatal under [`ErrorPolicy::Strict`],
+/// dropped under `Skip`, and captured to a file under `Quarantine`.
 #[cfg(feature = "async")]
 pub(crate) fn csv_read_stream(
     tx: &UnboundedSender<BatchResult>,
     reader: Box<dyn BufRead + Send>,
     chunk_rows: usize,
+    policy: &ErrorPolicy,
 ) {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
@@ -161,6 +224,7 @@ pub(crate) fn csv_read_stream(
         return;
     }
     let num_columns = headers.len();
+    let mut quarantine = QuarantineWriter::csv(&headers, policy);
 
     let mut schema: Option<Vec<DataType>> = None;
     // Flat byte arena of raw cell contents plus (offset, len) per cell, in
@@ -168,10 +232,36 @@ pub(crate) fn csv_read_stream(
     let mut arena: Vec<u8> = Vec::with_capacity(chunk_rows * 32);
     let mut cells: Vec<(usize, usize)> = Vec::with_capacity(chunk_rows * num_columns);
     let mut record = csv::StringRecord::new();
+    // `position()` after a read points at the *end* of that record, which is
+    // the start line of the next one — so we sample it before each read to
+    // know where the current record begins.
+    let mut row_line = reader.position().line();
 
     loop {
         match reader.read_record(&mut record) {
             Ok(true) => {
+                if record.len() != num_columns {
+                    let detail = format!(
+                        "CSV row at line {row_line} has {} field(s), expected {num_columns}",
+                        record.len()
+                    );
+                    match policy {
+                        ErrorPolicy::Strict => {
+                            let _ = tx.send(Err(Error::Schema(detail)));
+                            return;
+                        }
+                        ErrorPolicy::Skip => continue,
+                        ErrorPolicy::Quarantine(_) => {
+                            match quarantine.write_record(record.iter()) {
+                                Ok(()) => continue,
+                                Err(e) => {
+                                    let _ = tx.send(Err(Error::Io(e)));
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
                 // Reuse arena memory across chunks when possible.
                 for field in &record {
                     let start = arena.len();
@@ -193,6 +283,7 @@ pub(crate) fn csv_read_stream(
                     arena.clear();
                     cells.clear();
                 }
+                row_line = reader.position().line();
             }
             Ok(false) => break,
             Err(e) => {
@@ -214,6 +305,58 @@ pub(crate) fn csv_read_stream(
     }
 }
 
+/// Destination for malformed rows under [`ErrorPolicy::Quarantine`].
+#[cfg(feature = "async")]
+enum QuarantineWriter {
+    None,
+    /// Raw row written as CSV (header written on creation).
+    Csv(Box<csv::Writer<std::fs::File>>),
+    /// Raw line for text formats (JSONL).
+    Lines(Box<std::fs::File>),
+}
+
+#[cfg(feature = "async")]
+impl QuarantineWriter {
+    fn csv(headers: &[String], policy: &ErrorPolicy) -> Self {
+        let ErrorPolicy::Quarantine(path) = policy else {
+            return QuarantineWriter::None;
+        };
+        match std::fs::File::create(path) {
+            Ok(file) => {
+                // Malformed rows may have any field count: flexible(true).
+                let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
+                let _ = writer.write_record(headers);
+                QuarantineWriter::Csv(Box::new(writer))
+            }
+            // Quarantine targets are validated when the first malformed row
+            // arrives; a bad path surfaces there as an I/O error.
+            Err(_) => QuarantineWriter::None,
+        }
+    }
+
+    fn write_record<'a, I>(&mut self, fields: I) -> std::io::Result<()>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        match self {
+            QuarantineWriter::Csv(writer) => writer
+                .write_record(fields)
+                .map_err(|e| std::io::Error::other(e.to_string())),
+            _ => Ok(()),
+        }
+    }
+
+    fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        match self {
+            QuarantineWriter::Lines(file) => {
+                file.write_all(line.as_bytes())?;
+                file.write_all(b"\n")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 #[cfg(feature = "async")]
 impl std::fmt::Debug for CsvSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -230,11 +373,11 @@ impl std::fmt::Debug for CsvSource {
 /// Read an entire CSV file into batches (used to load join build relations).
 #[cfg(feature = "async")]
 pub(crate) fn read_csv_batches(path: &str, chunk_rows: usize) -> Result<Vec<RecordBatch>> {
-    let file = std::fs::File::open(path).map_err(Error::Io)?;
+    let reader = open_file_buffered(path).map_err(Error::Io)?;
     let reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
-        .from_reader(file);
+        .from_reader(reader);
     csv_reader_to_batches(reader, chunk_rows)
 }
 
@@ -269,6 +412,13 @@ fn csv_reader_to_batches<R: std::io::Read>(
     loop {
         match reader.read_record(&mut record) {
             Ok(true) => {
+                if record.len() != num_columns {
+                    let line = reader.position().line();
+                    return Err(Error::Schema(format!(
+                        "CSV row at line {line} has {} field(s), expected {num_columns}",
+                        record.len()
+                    )));
+                }
                 for field in &record {
                     let start = arena.len();
                     arena.extend_from_slice(field.as_bytes());
@@ -432,11 +582,16 @@ fn build_csv_column(
 // JSONL
 // ---------------------------------------------------------------------------
 
+/// Streams newline-delimited JSON (`.gz` supported with the `gzip`
+/// feature). The reader thread spawns on the first `next_batch`, so the
+/// `with_*` builders can be chained after `open`.
 #[cfg(feature = "async")]
 pub struct JsonlSource {
-    reader: StreamingReader,
+    reader: Option<StreamingReader>,
     pending: Option<BatchResult>,
+    path: String,
     chunk_rows: usize,
+    policy: ErrorPolicy,
 }
 
 #[cfg(feature = "async")]
@@ -446,14 +601,12 @@ impl JsonlSource {
     }
 
     pub fn open_with_chunk_size(path: impl Into<String>, chunk_rows: usize) -> Self {
-        let path = path.into();
-        let (reader, handle) =
-            StreamingReader::spawn(move |tx| jsonl_read_loop(tx, &path, chunk_rows));
-        let _ = handle;
         JsonlSource {
-            reader,
+            reader: None,
             pending: None,
+            path: path.into(),
             chunk_rows,
+            policy: ErrorPolicy::default(),
         }
     }
 
@@ -461,16 +614,36 @@ impl JsonlSource {
         self.chunk_rows = rows;
         self
     }
+
+    /// Set how undecodable lines are handled.
+    pub fn with_error_policy(mut self, policy: ErrorPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    fn spawn_reader(&mut self) -> &mut StreamingReader {
+        if self.reader.is_none() {
+            let path = self.path.clone();
+            let chunk_rows = self.chunk_rows;
+            let policy = self.policy.clone();
+            let (reader, handle) =
+                StreamingReader::spawn(move |tx| jsonl_read_loop(tx, &path, chunk_rows, &policy));
+            let _ = handle;
+            self.reader = Some(reader);
+        }
+        self.reader.as_mut().expect("just spawned")
+    }
 }
 
 #[cfg(feature = "async")]
-fn jsonl_read_loop(tx: &UnboundedSender<BatchResult>, path: &str, chunk_rows: usize) {
-    match std::fs::File::open(path) {
-        Ok(file) => jsonl_read_stream(
-            tx,
-            Box::new(std::io::BufReader::with_capacity(64 * 1024, file)),
-            chunk_rows,
-        ),
+fn jsonl_read_loop(
+    tx: &UnboundedSender<BatchResult>,
+    path: &str,
+    chunk_rows: usize,
+    policy: &ErrorPolicy,
+) {
+    match open_file_buffered(path) {
+        Ok(reader) => jsonl_read_stream(tx, reader, chunk_rows, policy),
         Err(e) => {
             let _ = tx.send(Err(Error::Io(e)));
         }
@@ -483,10 +656,21 @@ pub(crate) fn jsonl_read_stream(
     tx: &UnboundedSender<BatchResult>,
     mut reader: Box<dyn BufRead + Send>,
     chunk_rows: usize,
+    policy: &ErrorPolicy,
 ) {
     let mut objects: Vec<serde_json::Value> = Vec::with_capacity(chunk_rows);
     let mut schema: Option<Vec<(String, DataType)>> = None;
     let mut line = String::new();
+    let mut quarantine = match policy {
+        ErrorPolicy::Quarantine(path) => match std::fs::File::create(path) {
+            Ok(f) => QuarantineWriter::Lines(Box::new(f)),
+            Err(e) => {
+                let _ = tx.send(Err(Error::Io(e)));
+                return;
+            }
+        },
+        _ => QuarantineWriter::None,
+    };
 
     loop {
         match reader.read_line(&mut line) {
@@ -499,10 +683,20 @@ pub(crate) fn jsonl_read_stream(
                 }
                 match serde_json::from_str::<serde_json::Value>(&trimmed) {
                     Ok(v) => objects.push(v),
-                    Err(e) => {
-                        let _ = tx.send(Err(Error::Json(e)));
-                        return;
-                    }
+                    Err(e) => match policy {
+                        ErrorPolicy::Strict => {
+                            let _ = tx.send(Err(Error::Json(e)));
+                            return;
+                        }
+                        ErrorPolicy::Skip => continue,
+                        ErrorPolicy::Quarantine(_) => {
+                            if let Err(io) = quarantine.write_line(&trimmed) {
+                                let _ = tx.send(Err(Error::Io(io)));
+                                return;
+                            }
+                            continue;
+                        }
+                    },
                 }
                 if objects.len() >= chunk_rows {
                     match build_json_batch(&objects, &mut schema) {
@@ -743,12 +937,8 @@ impl JsonArraySource {
 
 #[cfg(feature = "async")]
 fn json_array_read_loop(tx: &UnboundedSender<BatchResult>, path: &str, chunk_rows: usize) {
-    match std::fs::File::open(path) {
-        Ok(file) => json_array_read_stream(
-            tx,
-            Box::new(std::io::BufReader::with_capacity(64 * 1024, file)),
-            chunk_rows,
-        ),
+    match open_file_buffered(path) {
+        Ok(reader) => json_array_read_stream(tx, reader, chunk_rows),
         Err(e) => {
             let _ = tx.send(Err(Error::Io(e)));
         }
@@ -942,9 +1132,68 @@ impl std::fmt::Debug for JsonArraySource {
 }
 
 #[cfg(feature = "async")]
-impl_source!(CsvSource);
+#[async_trait::async_trait]
+impl Source for CsvSource {
+    async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        if self.reader.is_none() {
+            self.spawn_reader();
+        }
+        let reader = self.reader.as_mut().expect("spawned above");
+        if reader.done {
+            return Ok(None);
+        }
+        if let Some(result) = self.pending.take() {
+            reader.done = true;
+            return match result {
+                Ok(b) => Ok(Some(b)),
+                Err(e) => Err(e),
+            };
+        }
+        match reader.next().await {
+            Some(Ok(batch)) => Ok(Some(batch)),
+            Some(Err(e)) => {
+                reader.done = true;
+                Err(e)
+            }
+            None => {
+                reader.done = true;
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[cfg(feature = "async")]
-impl_source!(JsonlSource);
+#[async_trait::async_trait]
+impl Source for JsonlSource {
+    async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        if self.reader.is_none() {
+            self.spawn_reader();
+        }
+        let reader = self.reader.as_mut().expect("spawned above");
+        if reader.done {
+            return Ok(None);
+        }
+        if let Some(result) = self.pending.take() {
+            reader.done = true;
+            return match result {
+                Ok(b) => Ok(Some(b)),
+                Err(e) => Err(e),
+            };
+        }
+        match reader.next().await {
+            Some(Ok(batch)) => Ok(Some(batch)),
+            Some(Err(e)) => {
+                reader.done = true;
+                Err(e)
+            }
+            None => {
+                reader.done = true;
+                Ok(None)
+            }
+        }
+    }
+}
 #[cfg(feature = "async")]
 impl_source!(JsonArraySource);
 

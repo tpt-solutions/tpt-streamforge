@@ -23,11 +23,18 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use tpt_stream_core::agg::AggSpec;
-use tpt_stream_core::Pipeline;
+use tpt_stream_core::join::JoinType;
+use tpt_stream_core::source::ErrorPolicy;
+use tpt_stream_core::{Check, Pipeline};
 
 create_exception!(tpt_streamforge, TptError, PyException);
 
 fn to_pyerr(err: tpt_stream_core::Error) -> PyErr {
+    TptError::new_err(err.to_string())
+}
+
+/// Wrap any Python-side error as a `TptError`.
+fn py_err(err: PyErr) -> PyErr {
     TptError::new_err(err.to_string())
 }
 
@@ -84,6 +91,129 @@ fn event_to_dict(py: Python<'_>, event: &tpt_stream_core::TelemetryEvent) -> Py<
     dict.unbind()
 }
 
+/// Parse `strict | skip | quarantine:<path>` into an [`ErrorPolicy`].
+fn parse_error_policy(text: &str) -> PyResult<ErrorPolicy> {
+    if text == "strict" {
+        Ok(ErrorPolicy::Strict)
+    } else if text == "skip" {
+        Ok(ErrorPolicy::Skip)
+    } else if let Some(path) = text.strip_prefix("quarantine:") {
+        Ok(ErrorPolicy::Quarantine(path.to_string()))
+    } else {
+        Err(TptError::new_err(
+            "error policy must be 'strict', 'skip', or 'quarantine:<path>'",
+        ))
+    }
+}
+
+/// Convert one core value into a Python object.
+fn value_to_py(py: Python<'_>, value: &tpt_stream_core::Value) -> PyResult<PyObject> {
+    use tpt_stream_core::Value;
+    Ok(match value {
+        Value::Null => py.None(),
+        Value::Bool(b) => b
+            .into_pyobject(py)
+            .map(|o| o.to_owned().unbind().into_any())?,
+        Value::Int32(v) => v
+            .into_pyobject(py)
+            .map(|o| o.to_owned().unbind().into_any())?,
+        Value::Int64(v) => v
+            .into_pyobject(py)
+            .map(|o| o.to_owned().unbind().into_any())?,
+        Value::Float32(v) => (*v as f64)
+            .into_pyobject(py)
+            .map(|o| o.to_owned().unbind().into_any())?,
+        Value::Float64(v) => v
+            .into_pyobject(py)
+            .map(|o| o.to_owned().unbind().into_any())?,
+        Value::Utf8(s) => s
+            .into_pyobject(py)
+            .map(|o| o.to_owned().unbind().into_any())?,
+    })
+}
+
+/// Convert a core batch into a pyarrow RecordBatch (requires the `pyarrow`
+/// package at runtime; conversion goes through arrow's PyArrow FFI).
+fn record_batch_to_arrow(
+    py: Python<'_>,
+    batch: &tpt_stream_core::RecordBatch,
+) -> PyResult<PyObject> {
+    use arrow::array::{
+        ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
+        RecordBatch as ArrowBatch, StringArray,
+    };
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+    use arrow::pyarrow::IntoPyArrow;
+    use std::sync::Arc;
+
+    let mut fields = Vec::with_capacity(batch.num_columns());
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
+    for column in batch.columns() {
+        let arrow_type = match column.data_type() {
+            tpt_stream_core::DataType::Int32 => ArrowDataType::Int32,
+            tpt_stream_core::DataType::Int64 => ArrowDataType::Int64,
+            tpt_stream_core::DataType::Float32 => ArrowDataType::Float32,
+            tpt_stream_core::DataType::Float64 => ArrowDataType::Float64,
+            tpt_stream_core::DataType::Bool => ArrowDataType::Boolean,
+            tpt_stream_core::DataType::Utf8 => ArrowDataType::Utf8,
+        };
+        fields.push(Field::new(column.name(), arrow_type.clone(), true));
+        fn typed_values<T, F>(column: &tpt_stream_core::Column, extract: F) -> Vec<Option<T>>
+        where
+            F: Fn(&tpt_stream_core::Value) -> Option<T>,
+        {
+            (0..column.len())
+                .map(|i| column.get(i).and_then(|v| extract(&v)))
+                .collect()
+        }
+        let array: ArrayRef = match column.data_type() {
+            tpt_stream_core::DataType::Int32 => {
+                Arc::new(Int32Array::from(typed_values(column, |v| match v {
+                    tpt_stream_core::Value::Int32(x) => Some(*x),
+                    _ => None,
+                })))
+            }
+            tpt_stream_core::DataType::Int64 => {
+                Arc::new(Int64Array::from(typed_values(column, |v| match v {
+                    tpt_stream_core::Value::Int64(x) => Some(*x),
+                    _ => None,
+                })))
+            }
+            tpt_stream_core::DataType::Float32 => {
+                Arc::new(Float32Array::from(typed_values(column, |v| match v {
+                    tpt_stream_core::Value::Float32(x) => Some(*x),
+                    _ => None,
+                })))
+            }
+            tpt_stream_core::DataType::Float64 => {
+                Arc::new(Float64Array::from(typed_values(column, |v| match v {
+                    tpt_stream_core::Value::Float64(x) => Some(*x),
+                    _ => None,
+                })))
+            }
+            tpt_stream_core::DataType::Bool => {
+                Arc::new(BooleanArray::from(typed_values(column, |v| match v {
+                    tpt_stream_core::Value::Bool(x) => Some(*x),
+                    _ => None,
+                })))
+            }
+            tpt_stream_core::DataType::Utf8 => {
+                Arc::new(StringArray::from(typed_values(column, |v| match v {
+                    tpt_stream_core::Value::Utf8(x) => Some(x.clone()),
+                    _ => None,
+                })))
+            }
+        };
+        arrays.push(array);
+    }
+
+    let arrow_batch = ArrowBatch::try_new(Arc::new(ArrowSchema::new(fields)), arrays)
+        .map_err(|e| TptError::new_err(format!("arrow conversion: {e}")))?;
+    arrow_batch
+        .into_pyarrow(py)
+        .map_err(|e| TptError::new_err(format!("pyarrow FFI: {e}")))
+}
+
 #[pyclass(name = "Pipeline")]
 struct PyPipeline {
     inner: Mutex<Pipeline>,
@@ -91,6 +221,41 @@ struct PyPipeline {
 }
 
 impl PyPipeline {
+    /// Run the pipeline, holding the output in memory (used by `collect`,
+    /// `to_arrow`, and `to_pandas`). Consumes the pipeline like `execute`.
+    fn collect_batches(&self, py: Python<'_>) -> PyResult<Vec<tpt_stream_core::RecordBatch>> {
+        {
+            let inner = self.inner.lock().unwrap();
+            check_pending(&inner)?;
+        }
+        let callback = self
+            .progress
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.clone_ref(py));
+        if let Some(callback) = callback {
+            let mut inner = self.inner.lock().unwrap();
+            inner.on_progress(Arc::new(move |event| {
+                Python::with_gil(|py| {
+                    let dict = event_to_dict(py, event);
+                    if let Err(err) = callback.call1(py, (dict,)) {
+                        eprintln!("tpt_streamforge: progress callback raised: {err}");
+                    }
+                });
+            }));
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| TptError::new_err(format!("failed to build runtime: {e}")))?;
+        py.allow_threads(|| {
+            let mut inner = self.inner.lock().unwrap();
+            runtime.block_on(inner.collect())
+        })
+        .map_err(to_pyerr)
+    }
+
     fn map_exprs(&self, mapping: &Bound<'_, PyDict>) -> PyResult<()> {
         let mut pairs: Vec<(String, String)> = Vec::new();
         for (k, v) in mapping.iter() {
@@ -249,41 +414,424 @@ impl PyPipeline {
     /// Run the pipeline. Returns a dict with `rows`, `batches`, `bytes_in`,
     /// `bytes_out`.
     fn execute(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let mut inner = self.inner.lock().unwrap();
-        check_pending(&inner)?;
-        // Attach the Python progress callback (if registered) as a telemetry
-        // hook. `execute` runs on this thread with the GIL held, so the hook
-        // can re-enter Python directly.
-        let callback = self
-            .progress
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|c| c.clone_ref(py));
-        if let Some(callback) = callback {
-            inner.on_progress(Arc::new(move |event| {
-                Python::with_gil(|py| {
-                    let dict = event_to_dict(py, event);
-                    if let Err(err) = callback.call1(py, (dict,)) {
-                        // A raising callback must not abort the pipeline;
-                        // surface the error and keep streaming.
-                        eprintln!("tpt_streamforge: progress callback raised: {err}");
-                    }
-                });
-            }));
+        // Scope the guard: the run below re-locks the (non-reentrant) mutex
+        // after the GIL is released.
+        {
+            let mut inner = self.inner.lock().unwrap();
+            check_pending(&inner)?;
+            // Attach the Python progress callback (if registered) as a
+            // telemetry hook; the GIL is held here, so re-entering Python
+            // from the hook is safe.
+            let callback = self
+                .progress
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|c| c.clone_ref(py));
+            if let Some(callback) = callback {
+                inner.on_progress(Arc::new(move |event| {
+                    Python::with_gil(|py| {
+                        let dict = event_to_dict(py, event);
+                        if let Err(err) = callback.call1(py, (dict,)) {
+                            // A raising callback must not abort the pipeline;
+                            // surface the error and keep streaming.
+                            eprintln!("tpt_streamforge: progress callback raised: {err}");
+                        }
+                    });
+                }));
+            }
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| TptError::new_err(format!("failed to build runtime: {e}")))?;
-        let stats = runtime.block_on(inner.execute()).map_err(to_pyerr)?;
-        drop(inner);
+        // Release the GIL so other Python threads keep running while the
+        // pipeline streams. The progress hook re-acquires it per event.
+        let stats = py
+            .allow_threads(|| {
+                let mut inner = self.inner.lock().unwrap();
+                runtime.block_on(inner.execute())
+            })
+            .map_err(to_pyerr)?;
         let out = PyDict::new(py);
         out.set_item("rows", stats.rows)?;
         out.set_item("batches", stats.batches)?;
         out.set_item("bytes_in", stats.bytes_in)?;
         out.set_item("bytes_out", stats.bytes_out)?;
         Ok(out.unbind())
+    }
+
+    /// Project rows to the given columns.
+    fn select(slf: Bound<'_, Self>, columns: &Bound<'_, PyList>) -> PyResult<Py<Self>> {
+        let cols: Vec<String> = columns.extract()?;
+        {
+            let cell = slf.borrow_mut();
+            let mut inner = cell.inner.lock().unwrap();
+            let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+            inner.select(&col_refs);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Hash join against a CSV file on disk: `join_type` is `"inner"`,
+    /// `"left"`, or `"right"`.
+    #[pyo3(signature = (right_path, left_keys, right_keys, join_type="inner"))]
+    fn join_csv(
+        slf: Bound<'_, Self>,
+        right_path: &str,
+        left_keys: &Bound<'_, PyList>,
+        right_keys: &Bound<'_, PyList>,
+        join_type: &str,
+    ) -> PyResult<Py<Self>> {
+        let join_type = match join_type {
+            "inner" => JoinType::Inner,
+            "left" => JoinType::Left,
+            "right" => JoinType::Right,
+            other => {
+                return Err(TptError::new_err(format!(
+                    "join_type must be inner|left|right, got {other:?}"
+                )))
+            }
+        };
+        let left: Vec<String> = left_keys.extract()?;
+        let right: Vec<String> = right_keys.extract()?;
+        {
+            let cell = slf.borrow_mut();
+            let mut inner = cell.inner.lock().unwrap();
+            let l: Vec<&str> = left.iter().map(|s| s.as_str()).collect();
+            let r: Vec<&str> = right.iter().map(|s| s.as_str()).collect();
+            inner
+                .join_csv(right_path, &l, &r, join_type)
+                .map_err(to_pyerr)?;
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Read newline-delimited JSON.
+    #[pyo3(signature = (path, chunk_size=None))]
+    fn read_jsonl(
+        slf: Bound<'_, Self>,
+        path: &str,
+        chunk_size: Option<usize>,
+    ) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            let mut inner = cell.inner.lock().unwrap();
+            if let Some(n) = chunk_size {
+                inner.with_chunk_size(n);
+            }
+            inner.read_jsonl(path);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Read a top-level JSON array of objects.
+    #[pyo3(signature = (path, chunk_size=None))]
+    fn read_json(
+        slf: Bound<'_, Self>,
+        path: &str,
+        chunk_size: Option<usize>,
+    ) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            let mut inner = cell.inner.lock().unwrap();
+            if let Some(n) = chunk_size {
+                inner.with_chunk_size(n);
+            }
+            inner.read_json(path);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Write results to newline-delimited JSON.
+    fn write_jsonl(slf: Bound<'_, Self>, path: &str) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().write_jsonl(path);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Write results to a JSON array; `pretty=True` adds indentation.
+    #[pyo3(signature = (path, pretty=false))]
+    fn write_json(slf: Bound<'_, Self>, path: &str, pretty: bool) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().write_json(path, pretty);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Read a native `.tptcol` columnar file.
+    fn read_columnar(slf: Bound<'_, Self>, path: &str) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().read_columnar(path);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Write results to a `.tptcol` columnar file (`use_zstd=True` compresses).
+    #[pyo3(signature = (path, use_zstd=false))]
+    fn write_columnar(slf: Bound<'_, Self>, path: &str, use_zstd: bool) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().write_columnar(path, use_zstd);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Stream the result of a SQLite SELECT query.
+    fn read_sqlite(slf: Bound<'_, Self>, path: &str, query: &str) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().read_sqlite(path, query);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Write batches into a SQLite table (created from the first batch).
+    fn write_sqlite(slf: Bound<'_, Self>, path: &str, table: &str) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().write_sqlite(path, table);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Stream the result of a PostgreSQL SELECT query.
+    fn read_postgres(slf: Bound<'_, Self>, conn_string: &str, query: &str) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().read_postgres(conn_string, query);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Write batches into a PostgreSQL table (COPY-based bulk load).
+    fn write_postgres(slf: Bound<'_, Self>, conn_string: &str, table: &str) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner
+                .lock()
+                .unwrap()
+                .write_postgres(conn_string, table);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Read an S3 (or S3-compatible) object. Credentials come from the
+    /// `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`
+    /// environment variables.
+    fn read_s3(slf: Bound<'_, Self>, bucket_url: &str, key: &str) -> PyResult<Py<Self>> {
+        let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
+        {
+            let cell = slf.borrow_mut();
+            let mut inner = cell.inner.lock().unwrap();
+            inner.read_s3(bucket_url, key, &creds).map_err(to_pyerr)?;
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Write results to an S3 (or S3-compatible) object (env credentials).
+    fn write_s3(slf: Bound<'_, Self>, bucket_url: &str, key: &str) -> PyResult<Py<Self>> {
+        let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
+        {
+            let cell = slf.borrow_mut();
+            let mut inner = cell.inner.lock().unwrap();
+            inner.write_s3(bucket_url, key, &creds).map_err(to_pyerr)?;
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Read a Google Cloud Storage object via the S3-compatible XML API
+    /// (env credentials: the HMAC key pair in `AWS_ACCESS_KEY_ID` /
+    /// `AWS_SECRET_ACCESS_KEY`).
+    fn read_gcs(slf: Bound<'_, Self>, bucket: &str, key: &str) -> PyResult<Py<Self>> {
+        let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
+        {
+            let cell = slf.borrow_mut();
+            let mut inner = cell.inner.lock().unwrap();
+            inner.read_gcs(bucket, key, &creds).map_err(to_pyerr)?;
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Write results to a Google Cloud Storage object (env credentials).
+    fn write_gcs(slf: Bound<'_, Self>, bucket: &str, key: &str) -> PyResult<Py<Self>> {
+        let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
+        {
+            let cell = slf.borrow_mut();
+            let mut inner = cell.inner.lock().unwrap();
+            inner.write_gcs(bucket, key, &creds).map_err(to_pyerr)?;
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Read an Azure blob. Credentials come from `AZURE_STORAGE_ACCOUNT` /
+    /// `AZURE_STORAGE_KEY` (or a connection string).
+    fn read_azure(
+        slf: Bound<'_, Self>,
+        account_url: &str,
+        container: &str,
+        key: &str,
+    ) -> PyResult<Py<Self>> {
+        let creds = tpt_stream_core::AzureCredentials::from_env().map_err(to_pyerr)?;
+        let store = tpt_stream_core::AzureBlobStore::new(account_url, container, &creds)
+            .map_err(to_pyerr)?;
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().read_azure_blob(store, key);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Write results to an Azure block blob (env credentials).
+    fn write_azure(
+        slf: Bound<'_, Self>,
+        account_url: &str,
+        container: &str,
+        key: &str,
+    ) -> PyResult<Py<Self>> {
+        let creds = tpt_stream_core::AzureCredentials::from_env().map_err(to_pyerr)?;
+        let store = tpt_stream_core::AzureBlobStore::new(account_url, container, &creds)
+            .map_err(to_pyerr)?;
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().write_azure_blob(store, key);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Stream a plain HTTP(S) URL. Format comes from the extension
+    /// (`.csv` default, `.jsonl`, `.json`); `.gz` URLs are decompressed.
+    fn read_http(slf: Bound<'_, Self>, url: &str) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().read_http(url);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Set the error policy for subsequent reads: `"strict"` (default),
+    /// `"skip"`, or `"quarantine:<path>"` to capture malformed rows.
+    fn on_error(slf: Bound<'_, Self>, policy: &str) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            let parsed = parse_error_policy(policy)?;
+            cell.inner.lock().unwrap().on_error(parsed);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Attach data-quality checks: `rows_at_least`, `rows_at_most`,
+    /// `no_nulls=[cols]`, `unique=[cols]`. A violation aborts `execute()`.
+    #[pyo3(signature = (rows_at_least=None, rows_at_most=None, no_nulls=None, unique=None))]
+    fn expect(
+        slf: Bound<'_, Self>,
+        rows_at_least: Option<u64>,
+        rows_at_most: Option<u64>,
+        no_nulls: Option<Vec<String>>,
+        unique: Option<Vec<String>>,
+    ) -> PyResult<Py<Self>> {
+        let mut checks: Vec<Check> = Vec::new();
+        if let Some(n) = rows_at_least {
+            checks.push(Check::RowsAtLeast(n));
+        }
+        if let Some(n) = rows_at_most {
+            checks.push(Check::RowsAtMost(n));
+        }
+        for col in no_nulls.unwrap_or_default() {
+            checks.push(Check::NoNulls(col));
+        }
+        for col in unique.unwrap_or_default() {
+            checks.push(Check::Unique(col));
+        }
+        if checks.is_empty() {
+            return Err(TptError::new_err("expect: no checks given"));
+        }
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().unwrap().expect_checks(checks);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Human-readable stage plan, e.g. `"source -> filter -> sink"`.
+    fn explain(&self) -> String {
+        self.inner.lock().unwrap().explain()
+    }
+
+    /// Run the stages over the first `n` output rows and return them as a
+    /// list of dicts (inspection only; consumes the source).
+    #[pyo3(signature = (n=10))]
+    fn preview(&self, py: Python<'_>, n: usize) -> PyResult<Vec<Py<PyDict>>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| TptError::new_err(format!("failed to build runtime: {e}")))?;
+        let batches = py
+            .allow_threads(|| {
+                let mut inner = self.inner.lock().unwrap();
+                runtime.block_on(inner.preview(n))
+            })
+            .map_err(to_pyerr)?;
+        let mut out = Vec::new();
+        for batch in batches {
+            for row in 0..batch.num_rows() {
+                let dict = PyDict::new(py);
+                for column in batch.columns() {
+                    let value = column.get(row).unwrap_or(tpt_stream_core::Value::Null);
+                    dict.set_item(column.name(), value_to_py(py, &value)?)?;
+                }
+                out.push(dict.unbind());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Run the pipeline and return every output row as a list of dicts.
+    /// Memory holds the whole result set.
+    fn collect(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        let batches = self.collect_batches(py)?;
+        let mut out = Vec::new();
+        for batch in batches {
+            for row in 0..batch.num_rows() {
+                let dict = PyDict::new(py);
+                for column in batch.columns() {
+                    let value = column.get(row).unwrap_or(tpt_stream_core::Value::Null);
+                    dict.set_item(column.name(), value_to_py(py, &value)?)?;
+                }
+                out.push(dict.unbind());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Run the pipeline and return the result as a `pyarrow.Table`
+    /// (requires the `pyarrow` package at runtime).
+    fn to_arrow(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let batches = self.collect_batches(py)?;
+        let pa = py.import("pyarrow").map_err(|_| {
+            TptError::new_err("to_arrow requires the 'pyarrow' package: pip install pyarrow")
+        })?;
+        let from_batches = pa
+            .getattr("Table")
+            .and_then(|t| t.getattr("from_batches"))
+            .map_err(py_err)?;
+        let objects: Vec<PyObject> = batches
+            .iter()
+            .map(|b| record_batch_to_arrow(py, b))
+            .collect::<PyResult<_>>()?;
+        let table = from_batches.call1((objects,)).map_err(py_err)?;
+        Ok(table.unbind())
+    }
+
+    /// Run the pipeline and return a pandas DataFrame (requires `pyarrow`).
+    fn to_pandas(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let table = self.to_arrow(py)?;
+        let frame = table.bind(py).call_method0("to_pandas")?;
+        Ok(frame.unbind())
     }
 
     /// Number of pipeline stages attached so far.

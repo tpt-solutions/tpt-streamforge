@@ -144,10 +144,11 @@ pub(crate) fn decode_object_stream(
     body: Box<dyn std::io::BufRead + Send>,
     format: CloudFormat,
     chunk_rows: usize,
+    policy: &crate::source::ErrorPolicy,
 ) {
     match format {
-        CloudFormat::Csv => crate::source::csv_read_stream(tx, body, chunk_rows),
-        CloudFormat::Jsonl => crate::source::jsonl_read_stream(tx, body, chunk_rows),
+        CloudFormat::Csv => crate::source::csv_read_stream(tx, body, chunk_rows, policy),
+        CloudFormat::Jsonl => crate::source::jsonl_read_stream(tx, body, chunk_rows, policy),
         CloudFormat::Json => crate::source::json_array_read_stream(tx, body, chunk_rows),
         CloudFormat::Columnar => crate::source::columnar_read_stream(tx, body),
     }

@@ -6,6 +6,7 @@ members = [
     "tpt-stream-ffi",
     "tpt-stream-py",
     "tpt-stream-wasm",
+    "tpt-stream-cli",
 ]
 
 [workspace.package]

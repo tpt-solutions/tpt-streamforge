@@ -72,6 +72,14 @@ impl RecordBatch {
         &mut self.columns
     }
 
+    /// Keep only the first `n` rows of every column.
+    pub fn truncate(&mut self, n: usize) {
+        for col in &mut self.columns {
+            col.truncate(n);
+        }
+        self.row_count = n.min(self.row_count);
+    }
+
     /// Recompute `row_count` from the first column's length. Call after in-place
     /// mutations (e.g. `Column::retain_rows`) that change buffer lengths.
     pub fn recompute_row_count(&mut self) {

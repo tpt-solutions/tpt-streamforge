@@ -7,6 +7,29 @@ function fresh(arr) {
   return Array.from(arr, (s) => String(s));
 }
 
+/** Serialize an array of flat objects to CSV text (first-seen key order). */
+function jsonRowsToCsv(rows) {
+  const keys = [];
+  const seen = new Set();
+  for (const row of rows) {
+    for (const k of Object.keys(row)) {
+      if (!seen.has(k)) {
+        seen.add(k);
+        keys.push(k);
+      }
+    }
+  }
+  const esc = (v) => {
+    const s = v === null || v === undefined ? '' : String(v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [keys.map(esc).join(',')];
+  for (const row of rows) {
+    lines.push(keys.map((k) => esc(row[k])).join(','));
+  }
+  return lines.join('\n') + '\n';
+}
+
 class Pipeline {
   constructor(input, chunkRows = 0) {
     if (input instanceof Engine) {
@@ -22,6 +45,23 @@ class Pipeline {
 
   static readFile(path, chunkRows = 0) {
     return new Pipeline(fs.readFileSync(path, 'utf8'), chunkRows);
+  }
+
+  /** Read a JSON file (array of objects or a single object). */
+  static readJsonFile(path, chunkRows = 0) {
+    const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+    const rows = Array.isArray(data) ? data : [data];
+    return new Pipeline(jsonRowsToCsv(rows), chunkRows);
+  }
+
+  /** Read a newline-delimited JSON (JSONL) file. */
+  static readJsonLinesFile(path, chunkRows = 0) {
+    const rows = fs
+      .readFileSync(path, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line));
+    return new Pipeline(jsonRowsToCsv(rows), chunkRows);
   }
 
   filter(expr) {
@@ -97,4 +137,11 @@ class Pipeline {
 
 const createPipeline = (csv, chunkRows) => new Pipeline(csv, chunkRows);
 
-module.exports = { Pipeline, Engine, createPipeline, readCSV: Pipeline.readFile };
+module.exports = {
+  Pipeline,
+  Engine,
+  createPipeline,
+  readCSV: Pipeline.readFile,
+  readJsonFile: Pipeline.readJsonFile,
+  readJsonLinesFile: Pipeline.readJsonLinesFile,
+};

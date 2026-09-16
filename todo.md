@@ -200,6 +200,61 @@ Dual-licensed MIT / Apache-2.0 | TPT Solutions
 - [x] Write performance comparison vs Pandas and DuckDB in README
 - [ ] Tag v0.1.0 release
 
+---
+
+## Phase 7: Hardening & Bug Fixes
+
+- [x] CSV source: reject ragged rows with a line-numbered schema error
+      (a short row previously shifted column packing and corrupted
+      subsequent rows)
+- [x] `Pipeline::execute()` errors when the source is exhausted instead of
+      silently returning `rows: 0` on a second run
+- [x] Release the GIL during Python `execute()` so other Python threads can
+      run while a pipeline streams
+- [x] Telemetry: `SinkBatch.total_rows` counts rows written to the sink
+      (was source rows); tail-drained rows also count toward `stage_stats`
+- [x] Postgres sink: retry once on connection loss; abort the connection
+      driver task on finish instead of leaking it
+- [x] S3 sink: clamp `with_part_size` to the 5 GiB single-PUT ceiling
+- [x] Pin CSV numeric type inference (Int32 → Int64 → Float64) with tests
+
+## Phase 8: Engine Features
+
+- [x] gzip-compressed CSV/JSONL/JSON sources (`.gz`, feature `gzip`, flate2)
+- [x] HTTP(S) source for plain URLs (feature `http`, reuses ureq)
+- [x] Error quarantine: source-level `on_error` policy
+      (`strict` | `skip` | `quarantine(path)`) for malformed input rows
+- [x] Data-quality `Expect` stage: row-count bounds, no-nulls, unique keys
+- [x] `Pipeline::explain()` (stage plan) and `Pipeline::preview(n)` (first
+      rows without running the whole pipeline); exposed in Python
+- [ ] Date/timestamp `DataType` variants end to end (sources, sinks, expr)
+
+## Phase 9: Language Bindings & Interop
+
+- [x] Python: expose `select` and `join` (CSV build side, inner/left/right)
+- [x] Python: JSONL/JSON array read/write + columnar read/write
+- [x] Python: SQLite and PostgreSQL read/write bindings
+- [x] Python: S3/GCS/Azure read/write bindings
+- [x] Python: `to_arrow()` / `to_pandas()` via arrow-rs pyarrow FFI
+      (+ `on_error`, `expect`, `explain`, `preview`, `collect`)
+- [x] Node: JSONL/JSON file I/O helpers (`readJsonFile`/`readJsonLinesFile`)
+
+## Phase 10: CLI, Automation & Adoption
+
+- [x] `tpt-stream-cli` crate: `tptforge run pipeline.yaml` (YAML pipelines)
+- [x] CLI: `tptforge schema FILE` and `tptforge preview FILE -n N`
+- [x] CLI: progress bar wired to telemetry (indicatif), `--quiet`
+- [x] CLI: end-to-end tests (CSV → filter → aggregate → CSV via YAML)
+- [x] Dockerfile (multi-stage) + CI build job for the CLI image
+- [x] Project template for new pipelines (templates/pipeline-starter)
+- [x] Runnable examples with tiny datasets: csv_to_jsonl, join_two_files,
+      dedup_sort_pipeline, telemetry_progress, s3_to_postgres (env-gated)
+- [x] `justfile`: test / bench / fmt / clippy / deny / py / wasm recipes
+- [x] CI: dependabot config (cargo + npm + actions)
+- [x] CI: put npm/PyPI publish jobs in a protected GitHub Environment
+- [ ] SQL frontend (SELECT/project/group-by subset via sqlparser) — future
+- [ ] WASM in-browser playground page — future
+
 
 
 

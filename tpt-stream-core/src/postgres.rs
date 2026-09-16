@@ -153,6 +153,7 @@ pub struct PostgresSink {
     table: String,
     drop_existing: bool,
     client: Option<tokio_postgres::Client>,
+    driver: Option<tokio::task::JoinHandle<()>>,
     rows_written: u64,
 }
 
@@ -163,6 +164,7 @@ impl PostgresSink {
             table: table.into(),
             drop_existing: false,
             client: None,
+            driver: None,
             rows_written: 0,
         }
     }
@@ -180,7 +182,10 @@ impl PostgresSink {
         let (client, conn) = tokio_postgres::connect(&self.conn_string, tokio_postgres::NoTls)
             .await
             .map_err(|e| Error::Database(format!("postgres connect: {e}")))?;
-        tokio::spawn(conn);
+        self.driver = Some(tokio::spawn(async move {
+            // Drive the connection; its result is reported through request failures.
+            let _ = conn.await;
+        }));
 
         if self.drop_existing {
             client
@@ -231,6 +236,41 @@ impl crate::sink::Sink for PostgresSink {
         if self.client.is_none() {
             self.connect(batch).await?;
         }
+        // One transparent retry after a dropped connection: long-running
+        // pipelines outlive idle TCP hops (NATs, pgbouncer) surprisingly often.
+        match self.copy_batch(batch).await {
+            Ok(()) => {}
+            Err(e) => {
+                self.client = None;
+                if let Some(driver) = self.driver.take() {
+                    driver.abort();
+                }
+                self.connect(batch).await?;
+                self.copy_batch(batch).await.map_err(|retry| {
+                    Error::Database(format!(
+                        "postgres copy (after reconnect): {retry}; first failure: {e}"
+                    ))
+                })?;
+            }
+        }
+        self.rows_written += batch.num_rows() as u64;
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        // Nothing to flush: each batch was committed by its own COPY.
+        // Shut down the connection driver task.
+        self.client = None;
+        if let Some(driver) = self.driver.take() {
+            driver.abort();
+        }
+        Ok(())
+    }
+}
+
+impl PostgresSink {
+    /// Bulk-load one batch with a single `COPY ... FROM STDIN` statement.
+    async fn copy_batch(&mut self, batch: &RecordBatch) -> Result<()> {
         let client = self.client.as_mut().expect("connected");
         let names: Vec<String> = batch.column_names().into_iter().map(quote_ident).collect();
         let copy_sql = format!(
@@ -264,12 +304,6 @@ impl crate::sink::Sink for PostgresSink {
             .finish()
             .await
             .map_err(|e| Error::Database(format!("postgres copy finish: {e}")))?;
-        self.rows_written += batch.num_rows() as u64;
-        Ok(())
-    }
-
-    async fn finish(&mut self) -> Result<()> {
-        // Nothing to flush: each batch was committed by its own COPY.
         Ok(())
     }
 }

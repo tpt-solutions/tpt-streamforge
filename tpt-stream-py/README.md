@@ -100,6 +100,24 @@ Pipeline().read_csv("in.csv").on_progress(events.append).write_csv("out.csv").ex
 kinds = [e["event"] for e in events]  # ["source_batch", "stage_batch", "sink_batch", ..., "done"]
 ```
 
+### Sources & sinks beyond CSV
+
+`.read_jsonl(path)` / `.read_json(path)` / `.read_columnar(path)` /
+`.read_http(url)` / `.read_sqlite(path, query)` / `.read_postgres(conn, query)`
+/ `.read_s3(bucket_url, key)` / `.read_gcs(bucket, key)` /
+`.read_azure(account_url, container, key)` and matching `.write_*` methods
+(.gz inputs decompress automatically; cloud credentials come from the
+standard `AWS_*` / `AZURE_*` environment variables).
+
+### More stages
+
+- `.select([...columns])` — projection
+- `.join_csv(right_path, left_keys, right_keys, join_type="inner")` — hash
+  join against a CSV build side (`inner`/`left`/`right`)
+- `.expect(rows_at_least=…, rows_at_most=…, no_nulls=[…], unique=[…])` —
+  data-quality gate; violations abort `execute()`
+- `.on_error("strict" | "skip" | "quarantine:<path>")` — malformed-row policy
+
 ### `.stage_stats()`
 Cumulative per-stage metrics from the last `execute()` run: a list of dicts
 with `name`, `rows_in`, `rows_out`, `batches`, `elapsed_ms`, and
@@ -108,6 +126,14 @@ with `name`, `rows_in`, `rows_out`, `batches`, `elapsed_ms`, and
 ### `.execute()`
 Run the pipeline (blocking). Raises `TptError` on expression parse errors,
 schema mismatches, or I/O failures.
+
+### `.explain()` / `.preview(n)` / `.collect()`
+
+- `.explain()` — the stage plan, e.g. `"source -> filter -> sink"`
+- `.preview(n)` — first `n` output rows as dicts (consumes the source)
+- `.collect()` — run and return every output row as a list of dicts
+- `.to_arrow()` / `.to_pandas()` — run and export to a `pyarrow.Table` or
+  pandas DataFrame (requires `pyarrow` at runtime)
 
 ### `.num_stages()`
 Number of transformation stages attached so far (for debugging).

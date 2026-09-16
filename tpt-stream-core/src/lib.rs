@@ -4,11 +4,13 @@ pub mod agg;
 pub mod azure;
 #[cfg(all(
     feature = "async",
-    any(feature = "s3", feature = "gcs", feature = "azure")
+    any(feature = "s3", feature = "gcs", feature = "azure", feature = "http")
 ))]
 pub mod cloud;
 #[cfg(all(feature = "async", feature = "gcs"))]
 pub mod gcs;
+#[cfg(all(feature = "async", feature = "http"))]
+pub mod http;
 #[cfg(all(feature = "async", any(feature = "s3", feature = "gcs")))]
 pub mod s3;
 pub mod column {
@@ -17,6 +19,8 @@ pub mod column {
 #[cfg(feature = "async")]
 pub mod dedup;
 pub mod error;
+#[cfg(feature = "async")]
+pub mod expect;
 pub mod expr;
 #[cfg(feature = "async")]
 pub mod join;
@@ -49,16 +53,20 @@ pub use agg::{AggFn, AggSpec, GroupByAgg};
 pub use azure::{AzureBlobSink, AzureBlobSource, AzureBlobStore, AzureCredentials};
 #[cfg(all(
     feature = "async",
-    any(feature = "s3", feature = "gcs", feature = "azure")
+    any(feature = "s3", feature = "gcs", feature = "azure", feature = "http")
 ))]
 pub use cloud::CloudFormat;
 pub use column::Column;
 #[cfg(feature = "async")]
 pub use dedup::Deduplicate;
 pub use error::{Error, PipelineStats, Result};
+#[cfg(feature = "async")]
+pub use expect::{Check, Expect};
 pub use expr::Expr;
 #[cfg(all(feature = "async", feature = "gcs"))]
 pub use gcs::{GcsSink, GcsSource, GcsStore};
+#[cfg(all(feature = "async", feature = "http"))]
+pub use http::HttpSource;
 #[cfg(feature = "async")]
 pub use join::{HashJoin, JoinType};
 #[cfg(feature = "async")]
@@ -72,6 +80,7 @@ pub use s3::{CloudCredentials, S3Sink, S3Source, S3Store};
 pub use sink::Sink;
 #[cfg(feature = "async")]
 pub use sort::Sort;
+pub use source::ErrorPolicy;
 #[cfg(feature = "async")]
 pub use source::Source;
 #[cfg(all(feature = "async", feature = "sqlite"))]

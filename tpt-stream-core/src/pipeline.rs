@@ -30,6 +30,8 @@ pub struct Pipeline {
     pending_error: Option<String>,
     telemetry: Option<crate::telemetry::ProgressHook>,
     stage_metrics: Vec<crate::telemetry::StageMetrics>,
+    error_policy: crate::source::ErrorPolicy,
+    executed: bool,
 }
 
 impl Default for Pipeline {
@@ -48,7 +50,77 @@ impl Pipeline {
             pending_error: None,
             telemetry: None,
             stage_metrics: Vec::new(),
+            error_policy: crate::source::ErrorPolicy::default(),
+            executed: false,
         }
+    }
+
+    /// Set how sources built after this call handle malformed input rows
+    /// (CSV field-count mismatches, undecodable JSONL lines): abort
+    /// (`Strict`, default), drop them (`Skip`), or drop and capture them
+    /// (`Quarantine(path)`).
+    pub fn on_error(&mut self, policy: crate::source::ErrorPolicy) -> &mut Self {
+        self.error_policy = policy;
+        self
+    }
+
+    /// Human-readable stage plan, e.g. `csv source -> filter -> csv sink`.
+    pub fn explain(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        parts.push("source".to_string());
+        for stage in &self.stages {
+            parts.push(stage.name().to_string());
+        }
+        if self.sink.is_some() {
+            parts.push("sink".to_string());
+        }
+        parts.join(" -> ")
+    }
+
+    /// Read the first `rows` output rows through the attached stages without
+    /// running the whole pipeline. Consumes the source (the pipeline must be
+    /// rebuilt afterwards, like after `execute`). Sinks are not touched.
+    pub async fn preview(&mut self, rows: usize) -> Result<Vec<RecordBatch>> {
+        if let Some(err) = self.pending_error.take() {
+            return Err(Error::Schema(err));
+        }
+        if self.executed {
+            return Err(Error::Config(
+                "pipeline already executed; sources are one-shot — rebuild it".into(),
+            ));
+        }
+        let mut source = self
+            .source
+            .take()
+            .ok_or_else(|| Error::Config("pipeline has no source".into()))?;
+        let mut collected: Vec<RecordBatch> = Vec::new();
+        let mut count = 0usize;
+        while count < rows {
+            let Some(batch) = source.next_batch().await? else {
+                break;
+            };
+            let mut current = vec![batch];
+            for stage in self.stages.iter_mut() {
+                let mut next = Vec::new();
+                for b in current {
+                    next.extend(stage.process(b).await?);
+                }
+                current = next;
+            }
+            for mut b in current {
+                if count >= rows {
+                    break;
+                }
+                let take = rows - count;
+                if b.num_rows() > take {
+                    b.truncate(take);
+                }
+                count += b.num_rows();
+                collected.push(b);
+            }
+        }
+        self.executed = true;
+        Ok(collected)
     }
 
     /// Attach a telemetry hook invoked on every source batch, stage output,
@@ -75,18 +147,18 @@ impl Pipeline {
     }
 
     pub fn read_csv(&mut self, path: impl Into<String>) -> &mut Self {
-        self.source(crate::source::CsvSource::open_with_chunk_size(
-            path,
-            self.chunk_rows,
-        ));
+        self.source(
+            crate::source::CsvSource::open_with_chunk_size(path, self.chunk_rows)
+                .with_error_policy(self.error_policy.clone()),
+        );
         self
     }
 
     pub fn read_jsonl(&mut self, path: impl Into<String>) -> &mut Self {
-        self.source(crate::source::JsonlSource::open_with_chunk_size(
-            path,
-            self.chunk_rows,
-        ));
+        self.source(
+            crate::source::JsonlSource::open_with_chunk_size(path, self.chunk_rows)
+                .with_error_policy(self.error_policy.clone()),
+        );
         self
     }
 
@@ -182,6 +254,12 @@ impl Pipeline {
         let cols: Vec<String> = columns.iter().map(|s| s.to_string()).collect();
         let desc = vec![true; cols.len()];
         self.stage(crate::sort::Sort::new(cols, desc))
+    }
+
+    /// Attach data-quality checks (see `tpt_stream_core::expect::Check`).
+    /// A violation aborts `execute()` with `Error::DataQuality`.
+    pub fn expect_checks(&mut self, checks: Vec<crate::expect::Check>) -> &mut Self {
+        self.stage(crate::expect::Expect::new(checks))
     }
 
     /// Drop rows whose identity columns (or whole row if `columns` is empty)
@@ -378,6 +456,17 @@ impl Pipeline {
         Ok(self)
     }
 
+    /// Stream a plain HTTP(S) URL as the source; the data format comes from
+    /// the URL extension (feature `http`).
+    #[cfg(feature = "http")]
+    pub fn read_http(&mut self, url: impl Into<String>) -> &mut Self {
+        self.source(crate::http::HttpSource::open_with_chunk_size(
+            url,
+            self.chunk_rows,
+        ));
+        self
+    }
+
     /// Stream an Azure blob as the source (feature `azure`).
     #[cfg(feature = "azure")]
     pub fn read_azure_blob(
@@ -411,15 +500,46 @@ impl Pipeline {
         self.pending_error.as_deref()
     }
 
+    /// Run the pipeline and return the resulting rows in memory instead of
+    /// writing them to a sink (any attached sink is ignored).
+    pub async fn collect(&mut self) -> Result<Vec<RecordBatch>> {
+        self.run(Some(Box::new(MemorySink::default())))
+            .await
+            .map(|(_, batches)| batches)
+    }
+
     pub async fn execute(&mut self) -> Result<PipelineStats> {
+        self.run(None).await.map(|(stats, _)| stats)
+    }
+
+    /// Shared runner behind [`Pipeline::execute`] and [`Pipeline::collect`]:
+    /// `sink_override` replaces the attached sink (or the absence of one).
+    /// Returns the output batches when an in-memory sink was used.
+    async fn run(
+        &mut self,
+        sink_override: Option<Box<dyn crate::sink::Sink>>,
+    ) -> Result<(PipelineStats, Vec<RecordBatch>)> {
         if let Some(err) = self.pending_error.take() {
             return Err(Error::Schema(err));
+        }
+        if self.executed {
+            return Err(Error::Config(
+                "pipeline already executed; sources are one-shot — rebuild it".into(),
+            ));
         }
         let mut source = self
             .source
             .take()
             .ok_or_else(|| Error::Config("pipeline has no source".into()))?;
-        let mut sink = self.sink.take();
+        let overrode_sink = sink_override.is_some();
+        let mut sink = Some(match sink_override {
+            Some(sink) => sink,
+            None => match self.sink.take() {
+                Some(sink) => sink,
+                None => Box::new(NullSink) as Box<dyn crate::sink::Sink>,
+            },
+        });
+        let mut collected: Vec<RecordBatch> = Vec::new();
         let telemetry = self.telemetry.take();
         let mut stage_metrics = vec![crate::telemetry::StageMetrics::default(); self.stages.len()];
         let emit = |event: &crate::telemetry::TelemetryEvent| {
@@ -428,6 +548,7 @@ impl Pipeline {
             }
         };
         let mut stats = PipelineStats::default();
+        let mut sink_rows: u64 = 0;
         let started = std::time::Instant::now();
 
         loop {
@@ -469,22 +590,29 @@ impl Pipeline {
             }
 
             if let Some(sink) = sink.as_mut() {
+                let mut written: u64 = 0;
                 for b in &current {
                     sink.write_batch(b).await?;
+                    written += b.num_rows() as u64;
                 }
+                sink_rows += written;
                 emit(&crate::telemetry::TelemetryEvent::SinkBatch {
-                    rows: current.iter().map(|b| b.num_rows() as u64).sum(),
-                    total_rows: stats.rows,
+                    rows: written,
+                    total_rows: sink_rows,
                 });
             }
+            collected.extend(current);
         }
 
         // Finalization: stages may buffer across chunks and emit tails once.
         // Drain each stage's tail through the downstream stages, in order, so
         // downstream tail-emitting stages receive upstream tails before their
-        // own finish is invoked.
+        // own finish is invoked. Tail rows count toward stage metrics.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..self.stages.len() {
+            let start = std::time::Instant::now();
             let tail = self.stages[i].finish().await?;
+            let rows_in: u64 = tail.iter().map(|b| b.num_rows() as u64).sum();
             let mut current = tail;
             for stage in self.stages.iter_mut().skip(i + 1) {
                 let mut next = Vec::new();
@@ -493,11 +621,22 @@ impl Pipeline {
                 }
                 current = next;
             }
+            let elapsed = start.elapsed();
+            let tail_rows_out: u64 = current.iter().map(|b| b.num_rows() as u64).sum();
+            // An empty tail contributed no work; don't log a phantom batch.
+            if rows_in > 0 || tail_rows_out > 0 {
+                let metrics = &mut stage_metrics[i];
+                metrics.rows_in += rows_in;
+                metrics.rows_out += tail_rows_out;
+                metrics.batches += 1;
+                metrics.elapsed += elapsed;
+            }
             if let Some(sink) = sink.as_mut() {
                 for b in &current {
                     sink.write_batch(b).await?;
                 }
             }
+            collected.extend(current);
         }
 
         if let Some(sink) = sink.as_mut() {
@@ -505,6 +644,7 @@ impl Pipeline {
             stats.bytes_out = sink.bytes_out();
         }
 
+        self.executed = true;
         stats.elapsed = started.elapsed();
         emit(&crate::telemetry::TelemetryEvent::Done {
             rows: stats.rows,
@@ -513,11 +653,48 @@ impl Pipeline {
         });
 
         self.source = Some(source);
-        self.sink = sink;
+        if !overrode_sink {
+            // A sink override (collect) drops the MemorySink; a normal run
+            // hands the user's sink back for byte counters on repeat calls.
+            self.sink = sink;
+        }
         self.telemetry = telemetry;
         self.stage_metrics = stage_metrics;
 
-        Ok(stats)
+        Ok((stats, collected))
+    }
+}
+
+/// In-memory sink used by [`Pipeline::collect`].
+#[derive(Default)]
+struct MemorySink {
+    batches: Vec<RecordBatch>,
+}
+
+#[async_trait::async_trait]
+impl crate::sink::Sink for MemorySink {
+    async fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.batches.push(batch.clone());
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Discards writes; used when a pipeline has stages but no sink so the
+/// runner can always hand a sink down.
+struct NullSink;
+
+#[async_trait::async_trait]
+impl crate::sink::Sink for NullSink {
+    async fn write_batch(&mut self, _batch: &RecordBatch) -> Result<()> {
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        Ok(())
     }
 }
 

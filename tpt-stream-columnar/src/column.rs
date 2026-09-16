@@ -264,6 +264,12 @@ impl Column {
     }
 
     /// Rebuild this column keeping only the rows for which `keep[i]` is true, preserving order.
+    /// Keep only the first `n` rows.
+    pub fn truncate(&mut self, n: usize) {
+        self.buffer.truncate(n);
+        self.nulls.truncate(n);
+    }
+
     pub fn retain_rows(&mut self, keep: &[bool]) {
         let mut cursor = 0usize;
         for (i, keep_row) in keep.iter().enumerate() {

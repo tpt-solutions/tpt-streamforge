@@ -388,7 +388,7 @@ pub(crate) fn cloud_read(
     chunk_rows: usize,
 ) {
     match store.read_object(key) {
-        Ok(body) => decode_object_stream(tx, body, format, chunk_rows),
+        Ok(body) => decode_object_stream(tx, body, format, chunk_rows, &Default::default()),
         Err(e) => {
             let _ = tx.send(Err(e));
         }
@@ -465,9 +465,12 @@ impl S3Sink {
     }
 
     /// Buffer size before a part is uploaded. Values below 5 MiB are raised
-    /// to 5 MiB (the S3 minimum for non-final parts).
+    /// to 5 MiB (the S3 minimum for non-final parts); values above 5 GiB are
+    /// lowered because a non-multipart `PUT` is capped at 5 GiB.
     pub fn with_part_size(mut self, bytes: usize) -> Self {
-        self.part_size = bytes.max(5 * 1024 * 1024);
+        const MIIB: usize = 1024 * 1024;
+        const GIB5: usize = 5 * 1024 * MIIB;
+        self.part_size = bytes.clamp(5 * MIIB, GIB5);
         self
     }
 

@@ -11,6 +11,18 @@ name = "tpt_streamforge"
 crate-type = ["cdylib"]
 
 [dependencies]
-tpt-stream-core = { path = "../tpt-stream-core", version = "0.1.0" }
+tpt-stream-core = { path = "../tpt-stream-core", version = "0.1.0", features = [
+    "sqlite",
+    "postgres",
+    "s3",
+    "gcs",
+    "azure",
+    "gzip",
+    "http",
+    "zstd",
+] }
 tokio = { workspace = true }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+async-trait = { workspace = true }
+arrow = { version = "54", default-features = false, features = ["pyarrow"] }
+anyhow = { workspace = true }

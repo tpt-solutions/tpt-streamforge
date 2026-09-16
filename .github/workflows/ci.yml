@@ -135,6 +135,14 @@ jobs:
           TPT_TEST_AZURE_ENDPOINT: http://127.0.0.1:10000/devstoreaccount1
           TPT_TEST_AZURE_CONTAINER: tpt-test
 
+  docker:
+    name: Build CLI container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t tptforge:ci .
+
   deny:
     name: cargo-deny check
     runs-on: ubuntu-latest
