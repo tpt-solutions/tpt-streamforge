@@ -32,7 +32,7 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 serde_yaml = "0.9"
-indicatif = "0.17"
+indicatif = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
