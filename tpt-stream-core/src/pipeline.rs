@@ -262,6 +262,11 @@ impl Pipeline {
         self.stage(crate::expect::Expect::new(checks))
     }
 
+    /// Pass through only the first `n` rows (pipeline `LIMIT`).
+    pub fn limit(&mut self, n: usize) -> &mut Self {
+        self.stage(crate::transform::Limit::new(n))
+    }
+
     /// Drop rows whose identity columns (or whole row if `columns` is empty)
     /// have already been seen in this pipeline.
     pub fn dedup(&mut self, columns: &[&str]) -> &mut Self {

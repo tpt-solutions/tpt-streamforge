@@ -126,6 +126,11 @@ fn value_to_py(py: Python<'_>, value: &tpt_stream_core::Value) -> PyResult<PyObj
         Value::Float64(v) => v
             .into_pyobject(py)
             .map(|o| o.to_owned().unbind().into_any())?,
+        // Dates/timestamps surface as ISO strings.
+        Value::Date(_) | Value::Timestamp(_) => value
+            .to_string()
+            .into_pyobject(py)
+            .map(|o| o.to_owned().unbind().into_any())?,
         Value::Utf8(s) => s
             .into_pyobject(py)
             .map(|o| o.to_owned().unbind().into_any())?,
@@ -155,6 +160,11 @@ fn record_batch_to_arrow(
             tpt_stream_core::DataType::Float32 => ArrowDataType::Float32,
             tpt_stream_core::DataType::Float64 => ArrowDataType::Float64,
             tpt_stream_core::DataType::Bool => ArrowDataType::Boolean,
+            // Date/timestamp columns export as ISO strings (arrow temporal
+            // types would need a tz-aware schema; strings interop everywhere).
+            tpt_stream_core::DataType::Date | tpt_stream_core::DataType::Timestamp => {
+                ArrowDataType::Utf8
+            }
             tpt_stream_core::DataType::Utf8 => ArrowDataType::Utf8,
         };
         fields.push(Field::new(column.name(), arrow_type.clone(), true));
@@ -194,6 +204,14 @@ fn record_batch_to_arrow(
             tpt_stream_core::DataType::Bool => {
                 Arc::new(BooleanArray::from(typed_values(column, |v| match v {
                     tpt_stream_core::Value::Bool(x) => Some(*x),
+                    _ => None,
+                })))
+            }
+            tpt_stream_core::DataType::Date | tpt_stream_core::DataType::Timestamp => {
+                Arc::new(StringArray::from(typed_values(column, |v| match v {
+                    tpt_stream_core::Value::Date(_) | tpt_stream_core::Value::Timestamp(_) => {
+                        Some(v.to_string())
+                    }
                     _ => None,
                 })))
             }

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Python wrapper for tpt-streamforge via PyO3"
+readme = "README.md"
+categories = ["development-tools::ffi"]
+keywords = ["python", "etl", "pyo3", "pandas", "data-engineering"]
 
 [lib]
 name = "tpt_streamforge"

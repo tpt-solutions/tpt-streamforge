@@ -163,6 +163,20 @@ fn encode_buffer(column: &Column) -> Vec<u8> {
             }
             out
         }
+        crate::column::ColumnBuffer::Date(v) => {
+            let mut out = Vec::with_capacity(v.len() * 4);
+            for x in v {
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+            out
+        }
+        crate::column::ColumnBuffer::Timestamp(v) => {
+            let mut out = Vec::with_capacity(v.len() * 8);
+            for x in v {
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+            out
+        }
         crate::column::ColumnBuffer::Utf8(v) => {
             // offsets (row+1 entries) + string blob
             let mut offsets = Vec::with_capacity((v.len() + 1) * 8);
@@ -216,6 +230,14 @@ fn decode_buffer(
                     return Err(FormatError::Malformed("bool data too short".into()));
                 }
                 Value::Bool(data[i] != 0)
+            }
+            DataType::Date => {
+                let slice = slice_chunk::<4>(data, i, rows, "date")?;
+                Value::Date(i32::from_le_bytes(slice.try_into().unwrap()))
+            }
+            DataType::Timestamp => {
+                let slice = slice_chunk::<8>(data, i, rows, "timestamp")?;
+                Value::Timestamp(i64::from_le_bytes(slice.try_into().unwrap()))
             }
             DataType::Utf8 => decode_utf8(data, i, rows)?,
         };
@@ -284,6 +306,8 @@ fn batch_has_big_buffers(batch: &RecordBatch) -> bool {
             crate::column::ColumnBuffer::Float64(v) => v.len() * 8,
             crate::column::ColumnBuffer::Bool(v) => v.len(),
             crate::column::ColumnBuffer::Utf8(v) => v.len() * 8,
+            crate::column::ColumnBuffer::Date(v) => v.len() * 4,
+            crate::column::ColumnBuffer::Timestamp(v) => v.len() * 8,
         };
         nulls > 512 || data > 512
     })
@@ -646,6 +670,8 @@ mod tests {
                 DataType::Float64 => Value::Float64(1.25),
                 DataType::Utf8 => Value::Utf8("text".into()),
                 DataType::Bool => Value::Bool(true),
+                DataType::Date => Value::Date(19_782),
+                DataType::Timestamp => Value::Timestamp(1_709_209_859_000_000),
             });
             col.push(Value::Null);
             col.push(match dtype {
@@ -655,6 +681,8 @@ mod tests {
                 DataType::Float64 => Value::Float64(-9.5),
                 DataType::Utf8 => Value::Utf8("第二".into()),
                 DataType::Bool => Value::Bool(false),
+                DataType::Date => Value::Date(-25_567),
+                DataType::Timestamp => Value::Timestamp(-1),
             });
             let batch = RecordBatch::new(vec![col]);
             let bytes = encode_batch(&batch, false).unwrap();

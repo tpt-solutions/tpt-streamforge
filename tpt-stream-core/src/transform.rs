@@ -147,6 +147,44 @@ impl PipelineStage for Map {
 }
 
 // ---------------------------------------------------------------------------
+// Limit
+// ---------------------------------------------------------------------------
+
+/// Pass through only the first `n` rows of the stream, then drop everything.
+#[derive(Debug)]
+pub struct Limit {
+    remaining: usize,
+}
+
+impl Limit {
+    pub fn new(n: usize) -> Self {
+        Limit { remaining: n }
+    }
+}
+
+#[async_trait::async_trait]
+impl PipelineStage for Limit {
+    fn name(&self) -> &'static str {
+        "limit"
+    }
+
+    async fn process(&mut self, batch: RecordBatch) -> Result<Vec<RecordBatch>> {
+        if self.remaining == 0 {
+            return Ok(Vec::new());
+        }
+        if batch.num_rows() <= self.remaining {
+            self.remaining -= batch.num_rows();
+            Ok(vec![batch])
+        } else {
+            let mut kept = batch;
+            kept.truncate(self.remaining);
+            self.remaining = 0;
+            Ok(vec![kept])
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Select (projection)
 // ---------------------------------------------------------------------------
 

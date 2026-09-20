@@ -14,6 +14,7 @@ use crate::table::RecordBatch;
 use crate::value::{DataType, Value};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use tpt_stream_columnar::value::{date_to_string, timestamp_to_string};
 
 type BatchResult = std::result::Result<RecordBatch, Error>;
 
@@ -25,6 +26,8 @@ fn sql_type_name(data_type: DataType) -> &'static str {
         DataType::Float64 => "DOUBLE PRECISION",
         DataType::Bool => "BOOLEAN",
         DataType::Utf8 => "TEXT",
+        DataType::Date => "DATE",
+        DataType::Timestamp => "TIMESTAMP",
     }
 }
 
@@ -49,6 +52,8 @@ fn copy_field(value: &Value) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Float32(v) => float_literal(*v as f64),
         Value::Float64(v) => float_literal(*v),
+        Value::Date(v) => date_to_string(*v),
+        Value::Timestamp(v) => timestamp_to_string(*v),
         Value::Utf8(s) => s
             .replace('\\', "\\\\")
             .replace('\t', "\\t")
@@ -64,6 +69,8 @@ fn quote_ident(name: &str) -> String {
 fn pg_type_to_data_type(pg_type: &tokio_postgres::types::Type) -> DataType {
     match *pg_type {
         tokio_postgres::types::Type::BOOL => DataType::Bool,
+        tokio_postgres::types::Type::DATE => DataType::Date,
+        tokio_postgres::types::Type::TIMESTAMP => DataType::Timestamp,
         tokio_postgres::types::Type::INT2 | tokio_postgres::types::Type::INT4 => DataType::Int32,
         tokio_postgres::types::Type::INT8 => DataType::Int64,
         tokio_postgres::types::Type::FLOAT4 => DataType::Float32,
@@ -74,6 +81,8 @@ fn pg_type_to_data_type(pg_type: &tokio_postgres::types::Type) -> DataType {
 
 fn infer_from_value(value: &Value) -> DataType {
     match value {
+        Value::Date(_) => DataType::Date,
+        Value::Timestamp(_) => DataType::Timestamp,
         Value::Bool(_) => DataType::Bool,
         Value::Int32(_) | Value::Int64(_) => DataType::Int64,
         Value::Float32(_) | Value::Float64(_) => DataType::Float64,
@@ -85,6 +94,19 @@ fn infer_from_value(value: &Value) -> DataType {
 fn coerce_to(value: Value, data_type: DataType) -> Value {
     match (value, data_type) {
         (Value::Null, _) => Value::Null,
+        // Dates pass through when the target matches; string sources parse.
+        (Value::Date(days), DataType::Date) => Value::Date(days),
+        (Value::Timestamp(micros), DataType::Timestamp) => Value::Timestamp(micros),
+        (Value::Utf8(s), DataType::Date) => match tpt_stream_columnar::value::parse_date(&s) {
+            Some(days) => Value::Date(days),
+            None => Value::Utf8(s),
+        },
+        (Value::Utf8(s), DataType::Timestamp) => {
+            match tpt_stream_columnar::value::parse_timestamp(&s) {
+                Some(micros) => Value::Timestamp(micros),
+                None => Value::Utf8(s),
+            }
+        }
         (Value::Bool(b), DataType::Int32) => Value::Int32(b as i32),
         (Value::Bool(b), DataType::Int64) => Value::Int64(b as i64),
         (Value::Bool(b), DataType::Float32) => Value::Float32(if b { 1.0 } else { 0.0 }),
@@ -115,6 +137,16 @@ fn coerce_to(value: Value, data_type: DataType) -> Value {
                             "true" | "1" => Value::Bool(true),
                             _ => Value::Bool(false),
                         };
+                    }
+                    DataType::Date => {
+                        if let Some(days) = tpt_stream_columnar::value::parse_date(s) {
+                            return Value::Date(days);
+                        }
+                    }
+                    DataType::Timestamp => {
+                        if let Some(micros) = tpt_stream_columnar::value::parse_timestamp(s) {
+                            return Value::Timestamp(micros);
+                        }
                     }
                     DataType::Int32 => {
                         if let Ok(v) = s.parse() {
@@ -473,9 +505,26 @@ fn read_cell(row: &tokio_postgres::Row, i: usize, data_type: &DataType) -> Value
         DataType::Float32 => typed!(f32, Float32),
         DataType::Float64 => typed!(f64, Float64),
         DataType::Utf8 => {}
+        DataType::Date => {}
+        DataType::Timestamp => {}
     }
     if let Ok(v) = row.try_get::<_, Option<String>>(i) {
-        return v.map(Value::Utf8).unwrap_or(Value::Null);
+        // DATE/TIMESTAMP columns arrive as text (no chrono decoding); parse
+        // into the target type so they stay typed end to end.
+        return match data_type {
+            DataType::Date => v
+                .and_then(|s| tpt_stream_columnar::value::parse_date(&s))
+                .map_or(Value::Null, Value::Date),
+            DataType::Timestamp => v
+                .and_then(|s| tpt_stream_columnar::value::parse_timestamp(&s))
+                .map_or(Value::Null, Value::Timestamp),
+            DataType::Bool
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Utf8 => v.map(Value::Utf8).unwrap_or(Value::Null),
+        };
     }
     Value::Null
 }

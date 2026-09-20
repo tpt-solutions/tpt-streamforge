@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Custom minimal columnar data format for tpt-streamforge"
+readme = "README.md"
+categories = ["encoding", "data-structures"]
+keywords = ["columnar", "olap", "zstd", "storage", "analytics"]
 
 [dependencies]
 thiserror.workspace = true

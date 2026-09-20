@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "tptforge: YAML-driven ETL pipelines on the tpt-streamforge engine"
+readme = "README.md"
+categories = ["command-line-utilities", "database"]
+keywords = ["cli", "etl", "yaml", "sql", "data-engineering"]
 
 [[bin]]
 name = "tptforge"
@@ -29,6 +32,7 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 serde_yaml = "0.9"
+sqlparser = "0.52"
 indicatif = "0.17"
 
 [dev-dependencies]

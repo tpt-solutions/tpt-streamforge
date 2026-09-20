@@ -8,6 +8,10 @@ pub enum ColumnBuffer {
     Float64(Vec<f64>),
     Utf8(Vec<String>),
     Bool(Vec<bool>),
+    /// Days since 1970-01-01.
+    Date(Vec<i32>),
+    /// Microseconds since 1970-01-01T00:00:00Z.
+    Timestamp(Vec<i64>),
 }
 
 impl ColumnBuffer {
@@ -19,6 +23,8 @@ impl ColumnBuffer {
             DataType::Float64 => ColumnBuffer::Float64(Vec::with_capacity(capacity)),
             DataType::Utf8 => ColumnBuffer::Utf8(Vec::with_capacity(capacity)),
             DataType::Bool => ColumnBuffer::Bool(Vec::with_capacity(capacity)),
+            DataType::Date => ColumnBuffer::Date(Vec::with_capacity(capacity)),
+            DataType::Timestamp => ColumnBuffer::Timestamp(Vec::with_capacity(capacity)),
         }
     }
 
@@ -30,6 +36,8 @@ impl ColumnBuffer {
             ColumnBuffer::Float64(v) => v.len(),
             ColumnBuffer::Utf8(v) => v.len(),
             ColumnBuffer::Bool(v) => v.len(),
+            ColumnBuffer::Date(v) => v.len(),
+            ColumnBuffer::Timestamp(v) => v.len(),
         }
     }
 
@@ -45,6 +53,8 @@ impl ColumnBuffer {
             ColumnBuffer::Float64(_) => DataType::Float64,
             ColumnBuffer::Utf8(_) => DataType::Utf8,
             ColumnBuffer::Bool(_) => DataType::Bool,
+            ColumnBuffer::Date(_) => DataType::Date,
+            ColumnBuffer::Timestamp(_) => DataType::Timestamp,
         }
     }
 
@@ -57,6 +67,8 @@ impl ColumnBuffer {
             (ColumnBuffer::Float64(buf), Value::Float64(v)) => buf.push(v),
             (ColumnBuffer::Utf8(buf), Value::Utf8(v)) => buf.push(v),
             (ColumnBuffer::Bool(buf), Value::Bool(v)) => buf.push(v),
+            (ColumnBuffer::Date(buf), Value::Date(v)) => buf.push(v),
+            (ColumnBuffer::Timestamp(buf), Value::Timestamp(v)) => buf.push(v),
             (column, value) => panic!(
                 "type mismatch: cannot push {value:?} into {:?} buffer",
                 column.data_type()
@@ -73,6 +85,8 @@ impl ColumnBuffer {
             ColumnBuffer::Float64(buf) => buf.push(0.0),
             ColumnBuffer::Utf8(buf) => buf.push(String::new()),
             ColumnBuffer::Bool(buf) => buf.push(false),
+            ColumnBuffer::Date(buf) => buf.push(0),
+            ColumnBuffer::Timestamp(buf) => buf.push(0),
         }
     }
 
@@ -84,6 +98,8 @@ impl ColumnBuffer {
             ColumnBuffer::Float64(v) => Value::Float64(*v.get(index)?),
             ColumnBuffer::Utf8(v) => Value::Utf8(v.get(index)?.clone()),
             ColumnBuffer::Bool(v) => Value::Bool(*v.get(index)?),
+            ColumnBuffer::Date(v) => Value::Date(*v.get(index)?),
+            ColumnBuffer::Timestamp(v) => Value::Timestamp(*v.get(index)?),
         };
         Some(value)
     }
@@ -96,6 +112,8 @@ impl ColumnBuffer {
             (ColumnBuffer::Float64(buf), Value::Float64(v)) => buf[index] = v,
             (ColumnBuffer::Utf8(buf), Value::Utf8(v)) => buf[index] = v,
             (ColumnBuffer::Bool(buf), Value::Bool(v)) => buf[index] = v,
+            (ColumnBuffer::Date(buf), Value::Date(v)) => buf[index] = v,
+            (ColumnBuffer::Timestamp(buf), Value::Timestamp(v)) => buf[index] = v,
             (column, value) => panic!(
                 "type mismatch: cannot set {value:?} into {:?} buffer",
                 column.data_type()
@@ -112,6 +130,8 @@ impl ColumnBuffer {
             ColumnBuffer::Float64(buf) => buf[index] = 0.0,
             ColumnBuffer::Utf8(buf) => buf[index] = String::new(),
             ColumnBuffer::Bool(buf) => buf[index] = false,
+            ColumnBuffer::Date(buf) => buf[index] = 0,
+            ColumnBuffer::Timestamp(buf) => buf[index] = 0,
         }
     }
 
@@ -123,6 +143,8 @@ impl ColumnBuffer {
             (ColumnBuffer::Float64(a), ColumnBuffer::Float64(b)) => a.extend_from_slice(b),
             (ColumnBuffer::Utf8(a), ColumnBuffer::Utf8(b)) => a.extend_from_slice(b),
             (ColumnBuffer::Bool(a), ColumnBuffer::Bool(b)) => a.extend_from_slice(b),
+            (ColumnBuffer::Date(a), ColumnBuffer::Date(b)) => a.extend_from_slice(b),
+            (ColumnBuffer::Timestamp(a), ColumnBuffer::Timestamp(b)) => a.extend_from_slice(b),
             _ => panic!("column type mismatch in extend_from"),
         }
     }
@@ -150,6 +172,12 @@ impl ColumnBuffer {
             ColumnBuffer::Bool(v) => {
                 v.swap_remove(index);
             }
+            ColumnBuffer::Date(v) => {
+                v.swap_remove(index);
+            }
+            ColumnBuffer::Timestamp(v) => {
+                v.swap_remove(index);
+            }
         }
     }
 
@@ -161,6 +189,8 @@ impl ColumnBuffer {
             ColumnBuffer::Float64(v) => v.truncate(len),
             ColumnBuffer::Utf8(v) => v.truncate(len),
             ColumnBuffer::Bool(v) => v.truncate(len),
+            ColumnBuffer::Date(v) => v.truncate(len),
+            ColumnBuffer::Timestamp(v) => v.truncate(len),
         }
     }
 }

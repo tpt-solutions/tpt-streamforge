@@ -120,6 +120,18 @@ impl Deduplicate {
                         out.push(b as char);
                     }
                 }
+                Some(Value::Date(x)) => {
+                    out.push('d');
+                    for b in x.to_le_bytes() {
+                        out.push(b as char);
+                    }
+                }
+                Some(Value::Timestamp(x)) => {
+                    out.push('t');
+                    for b in x.to_le_bytes() {
+                        out.push(b as char);
+                    }
+                }
                 Some(Value::Bool(x)) => out.push(if x { 't' } else { 'f' }),
                 Some(Value::Utf8(s)) => {
                     out.push('s');

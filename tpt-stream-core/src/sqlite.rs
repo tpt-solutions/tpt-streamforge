@@ -17,7 +17,8 @@ fn sql_type_name(data_type: DataType) -> &'static str {
     match data_type {
         DataType::Int32 | DataType::Int64 | DataType::Bool => "INTEGER",
         DataType::Float32 | DataType::Float64 => "REAL",
-        DataType::Utf8 => "TEXT",
+        // SQLite has no native date type: ISO text with DATE affinity.
+        DataType::Date | DataType::Timestamp | DataType::Utf8 => "TEXT",
     }
 }
 
@@ -30,6 +31,8 @@ fn value_to_sql(value: &Value) -> rusqlite::types::Value {
         Value::Int64(v) => Sql::Integer(*v),
         Value::Float32(v) => Sql::Real(*v as f64),
         Value::Float64(v) => Sql::Real(*v),
+        // ISO text survives round trips and stays sortable.
+        Value::Date(_) | Value::Timestamp(_) => Sql::Text(value.to_string()),
         Value::Utf8(s) => Sql::Text(s.clone()),
     }
 }
@@ -218,6 +221,10 @@ fn decl_type_to_data_type(decl: Option<&str>) -> Option<DataType> {
         Some(DataType::Float64)
     } else if decl.contains("CHAR") || decl.contains("TEXT") || decl.contains("CLOB") {
         Some(DataType::Utf8)
+    } else if decl.contains("TIMESTAMP") || decl.contains("DATETIME") {
+        Some(DataType::Timestamp)
+    } else if decl.contains("DATE") {
+        Some(DataType::Date)
     } else {
         None
     }
@@ -225,6 +232,8 @@ fn decl_type_to_data_type(decl: Option<&str>) -> Option<DataType> {
 
 fn infer_from_value(value: &Value) -> DataType {
     match value {
+        Value::Date(_) => DataType::Date,
+        Value::Timestamp(_) => DataType::Timestamp,
         Value::Bool(_) => DataType::Bool,
         Value::Int32(_) | Value::Int64(_) => DataType::Int64,
         Value::Float32(_) | Value::Float64(_) => DataType::Float64,
@@ -251,6 +260,22 @@ fn sqlite_value(vref: rusqlite::types::ValueRef<'_>, data_type: DataType) -> Val
         (V::Real(f), DataType::Int64) => Value::Int64(f as i64),
         (V::Real(f), DataType::Bool) => Value::Bool(f != 0.0),
         (V::Real(f), DataType::Utf8) => Value::Utf8(f.to_string()),
+        // SQLite stores dates as ISO text (DATE affinity columns read back
+        // as Text); parse into the declared type when it's date-like.
+        (V::Text(s), DataType::Date) => {
+            let text = String::from_utf8_lossy(s);
+            tpt_stream_columnar::value::parse_date(text.trim())
+                .map_or_else(|| Value::Utf8(text.into_owned()), Value::Date)
+        }
+        (V::Text(s), DataType::Timestamp) => {
+            let text = String::from_utf8_lossy(s);
+            tpt_stream_columnar::value::parse_timestamp(text.trim())
+                .map_or_else(|| Value::Utf8(text.into_owned()), Value::Timestamp)
+        }
+        (V::Integer(i), DataType::Date) => Value::Date(i as i32),
+        (V::Integer(i), DataType::Timestamp) => Value::Timestamp(i),
+        (V::Real(f), DataType::Date) => Value::Date(f as i32),
+        (V::Real(f), DataType::Timestamp) => Value::Timestamp(f as i64),
         (V::Text(s), _) => Value::Utf8(String::from_utf8_lossy(s).into_owned()),
         (V::Blob(b), _) => Value::Utf8(String::from_utf8_lossy(b).into_owned()),
     }
@@ -456,6 +481,16 @@ fn coerce_to(value: Value, data_type: DataType) -> Value {
                     DataType::Float64 => {
                         if let Ok(v) = s.parse() {
                             return Value::Float64(v);
+                        }
+                    }
+                    DataType::Date => {
+                        if let Some(days) = tpt_stream_columnar::value::parse_date(s) {
+                            return Value::Date(days);
+                        }
+                    }
+                    DataType::Timestamp => {
+                        if let Some(micros) = tpt_stream_columnar::value::parse_timestamp(s) {
+                            return Value::Timestamp(micros);
                         }
                     }
                     DataType::Utf8 => {}

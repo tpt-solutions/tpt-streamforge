@@ -28,10 +28,23 @@
   "sideEffects": false,
   "scripts": {
     "build": "wasm-pack build --target bundler --out-dir pkg ..",
-    "test": "webpack --config tests/webpack.config.mjs && node tests/dist/bundle.cjs"
+    "test": "webpack --config tests/webpack.config.mjs && node tests/dist/bundle.cjs",
+    "build:playground": "webpack --config playground/webpack.config.mjs",
+    "serve:playground": "npx --yes serve playground/dist"
   },
   "devDependencies": {
+    "copy-webpack-plugin": "^14.0.0",
+    "serve": "^14.2.6",
     "webpack": "^5.95.0",
     "webpack-cli": "^5.1.4"
-  }
+  },
+  "keywords": [
+    "etl",
+    "csv",
+    "json",
+    "wasm",
+    "streaming",
+    "data-engineering",
+    "pipeline"
+  ]
 }

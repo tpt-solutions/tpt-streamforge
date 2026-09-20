@@ -190,6 +190,8 @@ pub(crate) fn value_to_json(value: &Value) -> serde_json::Value {
             }
         }
         Value::Bool(b) => serde_json::Value::Bool(*b),
+        // Dates/timestamps serialize as ISO strings.
+        Value::Date(_) | Value::Timestamp(_) => serde_json::Value::String(value.to_string()),
         Value::Null => serde_json::Value::Null,
     }
 }

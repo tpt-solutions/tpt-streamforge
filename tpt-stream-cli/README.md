@@ -73,6 +73,20 @@ tptforge run pipeline.yaml
 (default: fail with a line number), `skip`, or `quarantine:<path>` (drop the
 row and capture it).
 
+## SQL
+
+```sh
+tptforge sql "SELECT region, SUM(amount) AS total FROM 'in.csv'   WHERE amount > 0 GROUP BY region ORDER BY total DESC LIMIT 10"
+tptforge sql "SELECT day, amount * 2 AS doubled FROM 'events.csv.gz'   WHERE day >= '2024-01-01'" --out totals.csv
+```
+
+Supported: single-table `SELECT` with column/arithmetic projections
+(aliases via `AS`), `WHERE` (comparisons, `AND`/`OR`/`NOT`, `IS [NOT] NULL`,
+arithmetic), `GROUP BY` with `SUM`/`AVG`/`COUNT`/`MIN`/`MAX`, `ORDER BY ...
+[ASC|DESC]`, and `LIMIT`. `FROM` accepts any file the sources support
+(CSV/JSONL/JSON/`.tptcol`, `.gz`, http(s) URLs). Unsupported SQL fails with
+an explicit error. Results print as CSV; `--out FILE` writes them instead.
+
 ## Inspecting data
 
 ```sh

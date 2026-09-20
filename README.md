@@ -26,8 +26,17 @@ loading whole datasets into memory.
   Shared Key auth (`azure`); multipart/block streaming uploads, no cloud SDK
   dependency.
 - **CLI** (`tpt-stream-cli`) — `tptforge run pipeline.yaml` runs streaming
-  ETL from a YAML file; `tptforge schema` / `tptforge preview` inspect data.
-  Dockerfile included; see [tpt-stream-cli/README.md](tpt-stream-cli/README.md).
+  ETL from a YAML file; `tptforge schema` / `tptforge preview` inspect data;
+  **`tptforge sql`** answers single-table `SELECT ... WHERE ... GROUP BY ...
+  ORDER BY ... LIMIT` queries straight from the engine. Dockerfile included;
+  see [tpt-stream-cli/README.md](tpt-stream-cli/README.md).
+- **Dates & timestamps** — ISO `date` and `timestamp` columns are inferred
+  from CSV/JSONL input, sorted chronologically, compared against string
+  literals in expressions, and stored natively in `.tptcol`, SQLite,
+  PostgreSQL, and cloud sinks.
+- **Browser playground** — try the engine in your browser at
+  `tpt-stream-wasm/browser/playground/` (`npm run build:playground` then
+  `npm run serve:playground`); all processing runs locally in WebAssembly.
 - **Robust inputs** — gzip (`csv.gz`), plain HTTP(S) URLs, and error
   policies (`strict` / `skip` / `quarantine:bad.csv`) for malformed rows.
 - **Telemetry** — progress callbacks and per-stage row/elapsed stats in Rust,

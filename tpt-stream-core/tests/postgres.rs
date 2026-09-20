@@ -150,16 +150,16 @@ fn postgres_source_typed_columns_and_chunking() {
         client
             .batch_execute(
                 "DROP TABLE IF EXISTS pg_types;
-                 CREATE TABLE pg_types (a INT4, b INT8, c FLOAT4, d FLOAT8, e BOOL, f TEXT);
-                 INSERT INTO pg_types VALUES (1, 2, 1.5, 2.5, TRUE, 'x');
-                 INSERT INTO pg_types VALUES (3, 4, 3.5, 4.5, FALSE, 'y');",
+                 CREATE TABLE pg_types (a INT4, b INT8, c FLOAT4, d FLOAT8, e BOOL, f TEXT, g DATE);
+                 INSERT INTO pg_types VALUES (1, 2, 1.5, 2.5, TRUE, 'x', '2024-01-15');
+                 INSERT INTO pg_types VALUES (3, 4, 3.5, 4.5, FALSE, 'y', '2024-03-01');",
             )
             .await
             .unwrap();
 
         let mut source = PostgresSource::open_with_chunk_size(
             &url,
-            "SELECT a, b, c, d, e, f FROM pg_types ORDER BY a",
+            "SELECT a, b, c, d, e, f, g FROM pg_types ORDER BY a",
             1,
         );
         let mut batches = Vec::new();
@@ -174,6 +174,7 @@ fn postgres_source_typed_columns_and_chunking() {
         assert_eq!(b.cell(0, "d"), Some(Value::Float64(2.5)));
         assert_eq!(b.cell(0, "e"), Some(Value::Bool(true)));
         assert_eq!(b.cell(0, "f"), Some(Value::Utf8("x".into())));
+        assert_eq!(b.cell(0, "g"), Some(Value::Date(19_737))); // 2024-01-15
         assert_eq!(batches[1].cell(0, "e"), Some(Value::Bool(false)));
     });
 }

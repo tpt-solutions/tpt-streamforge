@@ -566,6 +566,8 @@ pub unsafe extern "C" fn tpt_record_batch_get_column(
             tpt_stream_core::DataType::Float64 => 3,
             tpt_stream_core::DataType::Bool => 4,
             tpt_stream_core::DataType::Utf8 => 5,
+            tpt_stream_core::DataType::Date => 6,
+            tpt_stream_core::DataType::Timestamp => 7,
         };
         if !type_code.is_null() {
             // SAFETY: caller guarantees a valid pointer.
@@ -622,6 +624,8 @@ fn format_value(v: &tpt_stream_core::Value) -> String {
             }
         }
         V::Utf8(s) => s.clone(),
+        // ISO strings keep dates/timestamps readable over the C ABI.
+        V::Date(_) | V::Timestamp(_) => v.to_string(),
         V::Null => String::new(),
     }
 }

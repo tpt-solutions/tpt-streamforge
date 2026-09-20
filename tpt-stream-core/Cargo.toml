@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Core streaming ETL pipeline engine for tpt-streamforge"
+readme = "README.md"
+categories = ["database", "encoding", "concurrency"]
+keywords = ["etl", "streaming", "csv", "pipeline", "data-engineering"]
 
 [package.metadata.docs.rs]
 all-features = true

@@ -448,11 +448,13 @@ pub(crate) fn fits(data_type: DataType, cell: &str) -> bool {
 }
 
 pub(crate) fn escalate(current: DataType, cell: &str) -> DataType {
-    const ORDER: [DataType; 5] = [
+    const ORDER: [DataType; 7] = [
         DataType::Bool,
         DataType::Int32,
         DataType::Int64,
         DataType::Float64,
+        DataType::Date,
+        DataType::Timestamp,
         DataType::Utf8,
     ];
     let start = ORDER.iter().position(|d| *d == current);
@@ -465,6 +467,7 @@ pub(crate) fn escalate(current: DataType, cell: &str) -> DataType {
 }
 
 pub(crate) fn parse_cell(cell: &str, data_type: DataType) -> std::result::Result<Value, ()> {
+    use tpt_stream_columnar::value::{parse_date, parse_timestamp};
     match data_type {
         DataType::Int32 => cell.parse::<i32>().map(Value::Int32).map_err(|_| ()),
         DataType::Int64 => cell.parse::<i64>().map(Value::Int64).map_err(|_| ()),
@@ -475,6 +478,8 @@ pub(crate) fn parse_cell(cell: &str, data_type: DataType) -> std::result::Result
             "false" => Ok(Value::Bool(false)),
             _ => Err(()),
         },
+        DataType::Date => parse_date(cell).map(Value::Date).ok_or(()),
+        DataType::Timestamp => parse_timestamp(cell).map(Value::Timestamp).ok_or(()),
         DataType::Utf8 => Ok(Value::Utf8(cell.to_string())),
     }
 }
@@ -801,8 +806,24 @@ fn json_to_value(json: &serde_json::Value, data_type: DataType) -> Result<Value>
                 .map(|v| v != 0)
                 .map(Value::Bool)
                 .ok_or_else(|| Error::Schema(format!("cannot parse number {n} as bool"))),
+            DataType::Date => n
+                .as_i64()
+                .map(|v| Value::Date(v as i32))
+                .ok_or_else(|| Error::Schema(format!("cannot parse number {n} as date"))),
+            DataType::Timestamp => n
+                .as_i64()
+                .map(Value::Timestamp)
+                .ok_or_else(|| Error::Schema(format!("cannot parse number {n} as timestamp"))),
         },
-        serde_json::Value::String(s) => Ok(Value::Utf8(s.clone())),
+        serde_json::Value::String(s) => match data_type {
+            DataType::Date => tpt_stream_columnar::value::parse_date(s)
+                .map(Value::Date)
+                .ok_or_else(|| Error::Schema(format!("cannot parse {s:?} as date"))),
+            DataType::Timestamp => tpt_stream_columnar::value::parse_timestamp(s)
+                .map(Value::Timestamp)
+                .ok_or_else(|| Error::Schema(format!("cannot parse {s:?} as timestamp"))),
+            _ => Ok(Value::Utf8(s.clone())),
+        },
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
             Ok(Value::Utf8(json.to_string()))
         }

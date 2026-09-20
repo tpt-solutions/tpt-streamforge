@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "In-memory ETL for JS/WASM (browser + Node.js)"
+readme = "README.md"
+categories = ["wasm", "data-structures"]
+keywords = ["wasm", "webassembly", "etl", "javascript", "csv"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

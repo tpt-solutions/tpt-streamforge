@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use tpt_stream_cli::{preview_command, run_command, schema_command, Cli, Command};
+use tpt_stream_cli::{preview_command, run_command, schema_command, sql_command, Cli, Command};
 
 #[tokio::main]
 async fn main() {
@@ -18,6 +18,18 @@ async fn real_main() -> Result<()> {
                 .await
                 .with_context(|| format!("running {}", pipeline.display()))?;
             println!("{summary}");
+        }
+        Command::Sql {
+            query,
+            out,
+            on_error,
+        } => {
+            let output = sql_command(&query, out.as_deref(), &on_error).await?;
+            if output.ends_with('\n') {
+                print!("{output}");
+            } else {
+                println!("{output}");
+            }
         }
         Command::Schema { input, rows } => {
             print!("{}", schema_command(&input, rows).await?);

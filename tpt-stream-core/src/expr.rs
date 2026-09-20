@@ -562,9 +562,30 @@ fn is_numeric(v: &Value) -> bool {
 /// Ordering for non-numeric Value pairs (strings and bools). Unrelated types
 /// compare only by equality.
 fn compare_values(l: &Value, r: &Value) -> Option<std::cmp::Ordering> {
+    use tpt_stream_columnar::value::{parse_date, parse_timestamp};
     match (l, r) {
         (Value::Utf8(a), Value::Utf8(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
+        // Dates/timestamps order naturally and compare leniently against ISO
+        // string literals: day >= '2024-03-01'.
+        (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
+        (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
+        (Value::Date(a), Value::Utf8(b)) => {
+            let other = parse_date(b)?;
+            Some(a.cmp(&other))
+        }
+        (Value::Utf8(a), Value::Date(b)) => {
+            let this = parse_date(a)?;
+            Some(this.cmp(b))
+        }
+        (Value::Timestamp(a), Value::Utf8(b)) => {
+            let other = parse_timestamp(b)?;
+            Some(a.cmp(&other))
+        }
+        (Value::Utf8(a), Value::Timestamp(b)) => {
+            let this = parse_timestamp(a)?;
+            Some(this.cmp(b))
+        }
         _ if l == r => Some(std::cmp::Ordering::Equal),
         _ => None,
     }

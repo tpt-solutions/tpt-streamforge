@@ -621,6 +621,18 @@ fn encode_key(values: &[Value]) -> String {
                 out.push(':');
                 out.push_str(s);
             }
+            Value::Date(x) => {
+                out.push_str("D:");
+                for b in x.to_le_bytes() {
+                    out.push_str(&format!("{b:02x}"));
+                }
+            }
+            Value::Timestamp(x) => {
+                out.push_str("T:");
+                for b in x.to_le_bytes() {
+                    out.push_str(&format!("{b:02x}"));
+                }
+            }
             Value::Null => out.push('n'),
         }
     }
@@ -639,6 +651,8 @@ fn hash_key(values: &[Value]) -> u64 {
             Value::Float64(x) => x.to_bits().hash(&mut h),
             Value::Bool(x) => x.hash(&mut h),
             Value::Utf8(s) => s.hash(&mut h),
+            Value::Date(x) => x.hash(&mut h),
+            Value::Timestamp(x) => x.hash(&mut h),
             Value::Null => 0u8.hash(&mut h),
         }
     }

@@ -23,6 +23,8 @@ fn encode_cell(value: &Value) -> Vec<u8> {
         Value::Float32(v) => encode_f32_bits(v, u32::to_be_bytes).to_vec(),
         Value::Float64(v) => encode_f64_bits(v, u64::to_be_bytes).to_vec(),
         Value::Bool(v) => vec![u8::from(*v)],
+        Value::Date(v) => ((*v as u32) ^ 0x8000_0000).to_be_bytes().to_vec(),
+        Value::Timestamp(v) => ((*v as u64) ^ 0x8000_0000_0000_0000).to_be_bytes().to_vec(),
         Value::Utf8(s) => s.as_bytes().to_vec(),
         Value::Null => Vec::new(),
     }

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>tpt-streamforge playground</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      margin: 0 auto; max-width: 60rem; padding: 1rem 1.25rem 3rem;
+      line-height: 1.45;
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 0.25rem; }
+    p.sub { color: #666; margin-top: 0; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 52rem) { .grid { grid-template-columns: 1fr; } }
+    textarea {
+      width: 100%; height: 12rem; font: 0.85rem ui-monospace, monospace;
+      padding: 0.5rem; border: 1px solid #9992; border-radius: 6px;
+    }
+    .stage {
+      display: flex; gap: 0.4rem; align-items: center; margin: 0.35rem 0;
+    }
+    .stage select, .stage input {
+      font: inherit; padding: 0.25rem 0.4rem; border: 1px solid #9992;
+      border-radius: 6px; background: inherit; color: inherit;
+    }
+    .stage .expr { flex: 1; }
+    button.run {
+      font: inherit; font-weight: 600; padding: 0.45rem 1.1rem;
+      border-radius: 6px; border: none; cursor: pointer;
+      background: #2563eb; color: #fff;
+    }
+    button.remove {
+      border: none; background: #0000; color: #c33; cursor: pointer; font-size: 1rem;
+    }
+    table { border-collapse: collapse; font: 0.82rem ui-monospace, monospace; }
+    th, td { border: 1px solid #9993; padding: 0.2rem 0.5rem; text-align: left; }
+    thead th { background: #8881; }
+    .status { min-height: 1.3em; color: #666; }
+    .status.error { color: #c33; }
+    code { background: #8881; padding: 0.05rem 0.3rem; border-radius: 4px; }
+    h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem; }
+  </style>
+</head>
+<body>
+  <h1>tpt-streamforge playground</h1>
+  <p class="sub">All processing runs locally in your browser via WebAssembly — no data leaves the page.</p>
+
+  <h2>Input CSV</h2>
+  <textarea id="input" spellcheck="false"></textarea>
+
+  <h2>Pipeline stages</h2>
+  <div id="stages"></div>
+  <div class="stage">
+    <select id="new-op">
+      <option value="filter">filter (expr)</option>
+      <option value="map">map (name = expr)</option>
+      <option value="sort">sort by (columns, asc)</option>
+      <option value="dedup">dedup by (columns)</option>
+      <option value="aggregate">group by (cols) aggregate (name = fn(col))</option>
+    </select>
+    <button id="add">+ Add stage</button>
+    <span style="flex:1"></span>
+    <button class="run" id="run">Run pipeline</button>
+  </div>
+
+  <h2>Result</h2>
+  <div class="status" id="status"></div>
+  <div id="output"></div>
+
+  <script src="playground.js"></script>
+</body>
+</html>

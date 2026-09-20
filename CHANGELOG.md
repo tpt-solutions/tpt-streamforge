@@ -67,6 +67,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   covers CSV source, filter, map, select, aggregate, sort, dedup, hash join,
   and CSV→CSV on a shared 1M-row fixture; `scripts/compare_pandas_duckdb.py`
   runs the same operations under pandas and DuckDB for the README comparison.
+- **Date/timestamp data types** — ISO `date` (`YYYY-MM-DD`) and `timestamp`
+  (ISO 8601, microsecond precision) columns are inferred from CSV/JSONL
+  input, stored as day/microsecond integers in `.tptcol` (type codes 6/7),
+  sortable and comparable against ISO string literals in the expression
+  language (`day >= '2024-01-01'`), serialized as ISO strings in JSON and
+  over the FFI, mapped to `DATE`/`TIMESTAMP` columns in PostgreSQL, and
+  round-tripped through SQLite and the WASM/Python surfaces.
+- **`tptforge sql`** — a SQL frontend over the pipeline engine: single-table
+  `SELECT` with `WHERE`, `GROUP BY` + `SUM`/`AVG`/`COUNT`/`MIN`/`MAX`,
+  aliases, `ORDER BY`, and `LIMIT`, lowered onto filter/aggregate/sort/
+  limit stages; unsupported SQL fails explicitly. Backed by the new
+  `Pipeline::limit` stage and `sqlparser` (Apache-2.0).
+- **Browser playground** — an interactive in-browser pipeline builder at
+  `tpt-stream-wasm/browser/playground/` (filter/map/sort/dedup/aggregate
+  stages over pasted CSV, all client-side WebAssembly); built with
+  `npm run build:playground`.
+- **Per-crate documentation** — every crate now ships its own README
+  (crates.io `readme` metadata), `CHANGELOG.md`, and
+  crates.io `categories`/`keywords` metadata; npm packages carry keywords.
 - **`Pipeline::with_chunk_size` now applies to file sources** — `read_csv` /
   `read_jsonl` / `read_json` previously ignored the configured chunk size and
   always used the 65,536-row default.

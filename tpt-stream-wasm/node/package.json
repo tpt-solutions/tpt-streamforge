@@ -22,5 +22,14 @@
   "scripts": {
     "build": "wasm-pack build --target nodejs --out-dir pkg ..",
     "test": "node --test tests/*.test.js"
-  }
+  },
+  "keywords": [
+    "etl",
+    "csv",
+    "json",
+    "wasm",
+    "streaming",
+    "data-engineering",
+    "pipeline"
+  ]
 }

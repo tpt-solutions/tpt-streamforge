@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "C ABI boundary for tpt-streamforge"
+readme = "README.md"
+categories = ["development-tools::ffi"]
+keywords = ["ffi", "c-abi", "etl", "bindings"]
 
 [lib]
 crate-type = ["cdylib", "staticlib"]

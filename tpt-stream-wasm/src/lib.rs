@@ -546,6 +546,8 @@ fn key_component(v: &Value) -> String {
         Value::Float32(x) => format!("f{x}"),
         Value::Float64(x) => format!("f{x}"),
         Value::Bool(b) => format!("b{b}"),
+        Value::Date(d) => format!("D{d}"),
+        Value::Timestamp(t) => format!("T{t}"),
         Value::Utf8(s) => format!("s{s}"),
     }
 }
@@ -562,6 +564,8 @@ fn value_to_json(v: &Value) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         Value::Utf8(s) => json!(s),
         Value::Bool(b) => json!(b),
+        // Dates/timestamps serialize as ISO strings.
+        Value::Date(_) | Value::Timestamp(_) => json!(v.to_string()),
         Value::Null => serde_json::Value::Null,
     }
 }
@@ -620,6 +624,8 @@ fn coerce(v: &Value, target: DataType) -> Value {
             _ => Value::Utf8(x.to_string()),
         },
         Value::Utf8(s) if target == Utf8 => Value::Utf8(s.clone()),
+        Value::Date(d) if target == DataType::Date => Value::Date(*d),
+        Value::Timestamp(t) if target == DataType::Timestamp => Value::Timestamp(*t),
         value => Value::Utf8(value.to_string()),
     }
 }
@@ -630,10 +636,12 @@ fn rank_value(v: &Value) -> u8 {
     match v {
         Value::Null => 0,
         Value::Bool(_) => 1,
-        Value::Int32(_) => 2,
-        Value::Int64(_) => 3,
-        Value::Float32(_) | Value::Float64(_) => 4,
-        Value::Utf8(_) => 5,
+        Value::Date(_) => 2,
+        Value::Timestamp(_) => 3,
+        Value::Int32(_) => 4,
+        Value::Int64(_) => 5,
+        Value::Float32(_) | Value::Float64(_) => 6,
+        Value::Utf8(_) => 7,
     }
 }
 
@@ -646,9 +654,11 @@ fn unify_type(values: &[Value]) -> DataType {
     }
     match rank {
         0 | 1 => DataType::Bool,
-        2 => DataType::Int32,
-        3 => DataType::Int64,
-        4 => DataType::Float64,
+        2 => DataType::Date,
+        3 => DataType::Timestamp,
+        4 => DataType::Int32,
+        5 => DataType::Int64,
+        6 => DataType::Float64,
         _ => DataType::Utf8,
     }
 }
@@ -663,6 +673,21 @@ fn compare_values(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
         (Value::Null, Value::Null) => Ordering::Equal,
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Date(x), Value::Date(y)) => x.cmp(y),
+        (Value::Timestamp(x), Value::Timestamp(y)) => x.cmp(y),
+        // Lenient ISO-literal comparisons for date columns.
+        (Value::Date(x), Value::Utf8(y)) => {
+            tpt_stream_core::value::parse_date(y).map_or(Ordering::Equal, |o| x.cmp(&o))
+        }
+        (Value::Utf8(x), Value::Date(y)) => {
+            tpt_stream_core::value::parse_date(x).map_or(Ordering::Equal, |o| o.cmp(y))
+        }
+        (Value::Timestamp(x), Value::Utf8(y)) => {
+            tpt_stream_core::value::parse_timestamp(y).map_or(Ordering::Equal, |o| x.cmp(&o))
+        }
+        (Value::Utf8(x), Value::Timestamp(y)) => {
+            tpt_stream_core::value::parse_timestamp(x).map_or(Ordering::Equal, |o| o.cmp(y))
+        }
         (Value::Utf8(x), Value::Utf8(y)) => x.cmp(y),
         (x, y) if is_numeric(x) && is_numeric(y) => {
             to_f64(x).partial_cmp(&to_f64(y)).unwrap_or(Ordering::Equal)
@@ -806,6 +831,8 @@ fn avg_add(v: &Value) -> (f64, u64) {
         Value::Float32(x) => (*x as f64, 1),
         Value::Float64(x) => (*x, 1),
         Value::Bool(b) => (if *b { 1.0 } else { 0.0 }, 1),
+        Value::Date(d) => (*d as f64, 1),
+        Value::Timestamp(t) => (*t as f64, 1),
         Value::Utf8(s) => (s.parse::<f64>().unwrap_or(0.0), 1),
     }
 }

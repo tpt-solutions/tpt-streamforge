@@ -227,7 +227,7 @@ Dual-licensed MIT / Apache-2.0 | TPT Solutions
 - [x] Data-quality `Expect` stage: row-count bounds, no-nulls, unique keys
 - [x] `Pipeline::explain()` (stage plan) and `Pipeline::preview(n)` (first
       rows without running the whole pipeline); exposed in Python
-- [ ] Date/timestamp `DataType` variants end to end (sources, sinks, expr)
+- [x] Date/timestamp `DataType` variants end to end (sources, sinks, expr)
 
 ## Phase 9: Language Bindings & Interop
 
@@ -252,8 +252,8 @@ Dual-licensed MIT / Apache-2.0 | TPT Solutions
 - [x] `justfile`: test / bench / fmt / clippy / deny / py / wasm recipes
 - [x] CI: dependabot config (cargo + npm + actions)
 - [x] CI: put npm/PyPI publish jobs in a protected GitHub Environment
-- [ ] SQL frontend (SELECT/project/group-by subset via sqlparser) — future
-- [ ] WASM in-browser playground page — future
+- [x] SQL frontend (SELECT/project/group-by subset via sqlparser)
+- [x] WASM in-browser playground page
 
 
 

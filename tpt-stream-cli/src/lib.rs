@@ -19,6 +19,8 @@
 //! rows. Sources and sinks cover local files (CSV/JSONL/JSON/`.tptcol`,
 //! `.gz`-compressed), SQLite, PostgreSQL, S3/GCS/Azure, and plain HTTP URLs.
 
+pub mod sql;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -580,6 +582,22 @@ pub enum Command {
         #[arg(long)]
         quiet: bool,
     },
+    /// Run a single-table SQL SELECT against a file or URL.
+    ///
+    /// Example: tptforge sql "SELECT region, SUM(amount) AS total FROM
+    /// 'in.csv' WHERE amount > 0 GROUP BY region ORDER BY total DESC LIMIT 5"
+    Sql {
+        /// The SELECT query; FROM takes a file path (csv/jsonl/json/tptcol,
+        /// `.gz` supported) or an http(s) URL.
+        query: String,
+        /// Write results to a file instead of stdout (CSV).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Error policy for malformed input rows: strict | skip |
+        /// quarantine:<path>.
+        #[arg(long, default_value = "strict")]
+        on_error: String,
+    },
     /// Print the inferred schema (column name + type) of a data file or URL.
     Schema {
         /// File path (csv/jsonl/json/tptcol, `.gz` supported) or http(s) URL.
@@ -624,6 +642,33 @@ fn attach_progress(pipeline: &mut Pipeline) {
             _ => {}
         }
     }));
+}
+
+/// Execute `tptforge sql`.
+pub async fn sql_command(
+    query: &str,
+    out: Option<&std::path::Path>,
+    on_error: &str,
+) -> Result<String> {
+    let mut pipeline = crate::sql::build_sql_pipeline(query)?;
+    pipeline.on_error(match on_error {
+        "skip" => ErrorPolicy::Skip,
+        other if other.starts_with("quarantine:") => {
+            ErrorPolicy::Quarantine(other[11..].to_string())
+        }
+        _ => ErrorPolicy::Strict,
+    });
+    match out {
+        Some(path) => {
+            pipeline.write_csv(path.to_string_lossy());
+            pipeline.execute().await?;
+            Ok(format!("wrote {}", path.display()))
+        }
+        None => {
+            let batches = pipeline.collect().await?;
+            Ok(tpt_stream_core::source::batches_to_csv(&batches))
+        }
+    }
 }
 
 /// Execute `tptforge run`.
@@ -688,6 +733,8 @@ fn type_name(data_type: DataType) -> &'static str {
         DataType::Float32 => "float32",
         DataType::Float64 => "float64",
         DataType::Bool => "bool",
+        DataType::Date => "date",
+        DataType::Timestamp => "timestamp",
         DataType::Utf8 => "string",
     }
 }
