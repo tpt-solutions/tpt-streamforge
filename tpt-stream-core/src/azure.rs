@@ -2,9 +2,9 @@
 //!
 //! Talks to the Blob service REST API directly, using Shared Key
 //! authorization (HMAC-SHA256 over a canonical string) — the same scheme
-//! Azure Storage SDKs use, implemented on `ureq` + `hmac`/`sha2`/`base64`
-//! with no Azure SDK dependency. Works against real Azure Storage and the
-//! Azurite emulator.
+//! Azure Storage SDKs use, implemented on the in-house `httpclient` +
+//! `hmac`/`sha2`/`base64` with no Azure SDK dependency. Works against real
+//! Azure Storage and the Azurite emulator.
 //!
 //! ```no_run
 //! # async fn run() -> tpt_stream_core::Result<()> {
@@ -102,7 +102,7 @@ pub struct AzureBlobStore {
     /// `https://{account}.blob.core.windows.net` or the Azurite equivalent.
     base_url: String,
     decoded_key: Vec<u8>,
-    agent: ureq::Agent,
+    agent: crate::httpclient::Agent,
 }
 
 impl std::fmt::Debug for AzureBlobStore {
@@ -142,7 +142,7 @@ impl AzureBlobStore {
             container: container.trim_matches('/').to_string(),
             base_url,
             decoded_key: credentials.decoded_key()?,
-            agent: ureq::AgentBuilder::new().build(),
+            agent: crate::httpclient::Agent::new(),
         })
     }
 
@@ -317,9 +317,9 @@ fn query_string(query: &[(&str, &str)]) -> String {
     format!("?{}", joined.join("&"))
 }
 
-fn http_error(op: &str, key: &str, err: ureq::Error) -> Error {
+fn http_error(op: &str, key: &str, err: crate::httpclient::Error) -> Error {
     match err {
-        ureq::Error::Status(code, response) => {
+        crate::httpclient::Error::Status(code, response) => {
             let reason = response
                 .into_string()
                 .map(|body| {
@@ -329,7 +329,9 @@ fn http_error(op: &str, key: &str, err: ureq::Error) -> Error {
                 .unwrap_or_else(|_| format!("status {code}"));
             Error::Cloud(format!("{op} {key:?}: {reason}"))
         }
-        ureq::Error::Transport(t) => Error::Cloud(format!("{op} {key:?}: transport: {t}")),
+        crate::httpclient::Error::Transport(t) => {
+            Error::Cloud(format!("{op} {key:?}: transport: {t}"))
+        }
     }
 }
 

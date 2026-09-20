@@ -11,6 +11,8 @@ pub mod cloud;
 pub mod gcs;
 #[cfg(all(feature = "async", feature = "http"))]
 pub mod http;
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure", feature = "http"))]
+pub mod httpclient;
 #[cfg(all(feature = "async", any(feature = "s3", feature = "gcs")))]
 pub mod s3;
 pub mod column {

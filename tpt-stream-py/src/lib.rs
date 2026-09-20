@@ -738,7 +738,10 @@ impl PyPipeline {
         let pd = py.import("pandas").map_err(|_| {
             TptError::new_err("to_pandas requires the 'pandas' package: pip install pandas")
         })?;
-        let frame = pd.getattr("DataFrame").and_then(|c| c.call1((rows,))).map_err(py_err)?;
+        let frame = pd
+            .getattr("DataFrame")
+            .and_then(|c| c.call1((rows,)))
+            .map_err(py_err)?;
         Ok(frame.unbind())
     }
 

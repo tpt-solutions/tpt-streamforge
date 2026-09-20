@@ -1,0 +1,14 @@
+[package]
+name = "tpt-csv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal, dependency-free streaming CSV reader/writer (RFC 4180-style quoting)"
+readme = "README.md"
+categories = ["encoding", "parser-implementations"]
+keywords = ["csv", "parser", "streaming", "rfc4180"]
+
+[lib]
+name = "tpt_csv"
+

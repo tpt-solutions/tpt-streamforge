@@ -74,9 +74,9 @@ impl std::fmt::Debug for CsvSink {
 impl Sink for CsvSink {
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
         self.ensure_file().await?;
-        let mut writer = csv::WriterBuilder::new().from_writer(&mut self.buffer);
+        let mut writer = tpt_csv::WriterBuilder::new().from_writer(&mut self.buffer);
 
-        let mut record = csv::StringRecord::new();
+        let mut record = tpt_csv::StringRecord::new();
         if !self.wrote_header {
             for name in batch.column_names() {
                 record.push_field(name);
@@ -98,7 +98,7 @@ impl Sink for CsvSink {
             writer.write_record(&record).map_err(Error::Csv)?;
         }
 
-        // csv::Writer flushes into the underlying &mut buffer on drop.
+        // tpt_csv::Writer flushes into the underlying &mut buffer on drop.
         drop(writer);
 
         // If roughly 1MB of CSV has accumulated, flush to disk.

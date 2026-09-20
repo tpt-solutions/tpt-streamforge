@@ -207,7 +207,7 @@ pub(crate) fn csv_read_stream(
     chunk_rows: usize,
     policy: &ErrorPolicy,
 ) {
-    let mut reader = csv::ReaderBuilder::new()
+    let mut reader = tpt_csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
         .from_reader(reader);
@@ -231,7 +231,7 @@ pub(crate) fn csv_read_stream(
     // row-major order. Avoids one String allocation per cell.
     let mut arena: Vec<u8> = Vec::with_capacity(chunk_rows * 32);
     let mut cells: Vec<(usize, usize)> = Vec::with_capacity(chunk_rows * num_columns);
-    let mut record = csv::StringRecord::new();
+    let mut record = tpt_csv::StringRecord::new();
     // `position()` after a read points at the *end* of that record, which is
     // the start line of the next one — so we sample it before each read to
     // know where the current record begins.
@@ -310,7 +310,7 @@ pub(crate) fn csv_read_stream(
 enum QuarantineWriter {
     None,
     /// Raw row written as CSV (header written on creation).
-    Csv(Box<csv::Writer<std::fs::File>>),
+    Csv(Box<tpt_csv::Writer<std::fs::File>>),
     /// Raw line for text formats (JSONL).
     Lines(Box<std::fs::File>),
 }
@@ -324,7 +324,7 @@ impl QuarantineWriter {
         match std::fs::File::create(path) {
             Ok(file) => {
                 // Malformed rows may have any field count: flexible(true).
-                let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
+                let mut writer = tpt_csv::WriterBuilder::new().flexible(true).from_writer(file);
                 let _ = writer.write_record(headers);
                 QuarantineWriter::Csv(Box::new(writer))
             }
@@ -374,7 +374,7 @@ impl std::fmt::Debug for CsvSource {
 #[cfg(feature = "async")]
 pub(crate) fn read_csv_batches(path: &str, chunk_rows: usize) -> Result<Vec<RecordBatch>> {
     let reader = open_file_buffered(path).map_err(Error::Io)?;
-    let reader = csv::ReaderBuilder::new()
+    let reader = tpt_csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
         .from_reader(reader);
@@ -385,7 +385,7 @@ pub(crate) fn read_csv_batches(path: &str, chunk_rows: usize) -> Result<Vec<Reco
 /// Exposed for language wrappers that do not have a filesystem (WASM) and for
 /// the FFI tests.
 pub fn csv_to_batches(text: &str, chunk_rows: usize) -> Result<Vec<RecordBatch>> {
-    let reader = csv::ReaderBuilder::new()
+    let reader = tpt_csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
         .from_reader(text.as_bytes());
@@ -393,7 +393,7 @@ pub fn csv_to_batches(text: &str, chunk_rows: usize) -> Result<Vec<RecordBatch>>
 }
 
 fn csv_reader_to_batches<R: std::io::Read>(
-    mut reader: csv::Reader<R>,
+    mut reader: tpt_csv::Reader<R>,
     chunk_rows: usize,
 ) -> Result<Vec<RecordBatch>> {
     let headers: Vec<String> = match reader.headers() {
@@ -407,7 +407,7 @@ fn csv_reader_to_batches<R: std::io::Read>(
     let mut schema: Option<Vec<DataType>> = None;
     let mut arena: Vec<u8> = Vec::with_capacity(chunk_rows * 32);
     let mut cells: Vec<(usize, usize)> = Vec::with_capacity(chunk_rows * num_columns);
-    let mut record = csv::StringRecord::new();
+    let mut record = tpt_csv::StringRecord::new();
     let mut batches = Vec::new();
     loop {
         match reader.read_record(&mut record) {
@@ -1366,8 +1366,8 @@ mod tests {
 pub fn batches_to_csv(batches: &[RecordBatch]) -> String {
     let mut buffer: Vec<u8> = Vec::new();
     {
-        let mut writer = csv::WriterBuilder::new().from_writer(&mut buffer);
-        let mut record = csv::StringRecord::new();
+        let mut writer = tpt_csv::WriterBuilder::new().from_writer(&mut buffer);
+        let mut record = tpt_csv::StringRecord::new();
         for (bi, batch) in batches.iter().enumerate() {
             if bi == 0 {
                 for name in batch.column_names() {

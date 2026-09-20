@@ -50,8 +50,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Cloud object storage sources/sinks** — S3 (`s3` feature), Google Cloud
   Storage via the S3-compatible XML API + HMAC keys (`gcs`), and Azure Blob
   via Shared Key signing (`azure`). Built on `rusty-s3` (sans-IO SigV4) and
-  `ureq` with rustls for S3/GCS, and `hmac`/`sha2`/`base64` for Azure — no
-  cloud SDK dependency. Formats follow the key extension (`.csv`,
+  an in-house minimal HTTP/1.1-over-TLS client (`httpclient` module, on
+  `rustls` + `rustls-rustcrypto`) for S3/GCS/HTTP, and `hmac`/`sha2`/`base64`
+  for Azure — no cloud SDK dependency. Formats follow the key extension (`.csv`,
   `.jsonl`/`.ndjson`, `.json`, `.tptcol`); sinks stream multipart uploads /
   staged blocks with a configurable part size and abort/keep consistent state
   on failure. Wired into `Pipeline::read_s3` / `write_s3` / `read_gcs` /
@@ -141,6 +142,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Dependency license policy: no Apache-2.0-only crates.** The project is
+  dual MIT/Apache-2.0 so a consumer who wants MIT terms alone always has a
+  legal path to the whole dependency tree; that broke wherever a dependency
+  was offered under Apache-2.0 only (no MIT option). Removed: `arrow`/
+  `arrow-*` (Python `to_arrow()`/`to_pandas()` now goes through `collect()`
+  + `pandas.DataFrame`, no Arrow dependency), `sqlparser` (`tptforge sql`
+  now uses a small in-house recursive-descent parser for its existing
+  supported subset), and `ring` (dropped `ureq` entirely — its `rustls`
+  dependency couldn't be steered off `ring` via Cargo feature unification —
+  in favor of an in-house minimal HTTP/1.1-over-TLS client on `rustls` +
+  the `rustls-rustcrypto` provider, pure Rust, MIT/Apache-2.0 dual). Note:
+  `rustls-rustcrypto` is v0.0.2-alpha and far less battle-tested than
+  `ring` for TLS; accepted as a deliberate trade-off of license purity
+  against crypto-backend maturity. `ryu` (via `csv`/`serde_yaml`) and
+  `target-lexicon` (build-time only, forced by `pyo3-build-config`) remain
+  under investigation.
 - `deny.toml` modernized for cargo-deny ≥ 0.18: allowlist-only licensing
   (any license not allowed is denied, keeping copyleft families out), the
   new `Unicode-3.0` (ICU crates via `url`) and `CDLA-Permissive-2.0`

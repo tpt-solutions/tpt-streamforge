@@ -66,6 +66,46 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Postgres's binary epoch is 2000-01-01; our `Value::Date`/`Value::Timestamp`
+/// count from the Unix epoch (1970-01-01). 10,957 is the day count between them.
+const PG_EPOCH_DAYS: i32 = 10_957;
+const PG_EPOCH_MICROS: i64 = 946_684_800_000_000;
+
+/// Decodes a binary-format `DATE` column into days since the Unix epoch.
+/// `tokio_postgres` has no built-in `FromSql` for `DATE`/`TIMESTAMP` without
+/// pulling in `chrono`, so this reads the raw big-endian integer directly.
+struct PgDate(i32);
+
+impl<'a> tokio_postgres::types::FromSql<'a> for PgDate {
+    fn from_sql(
+        _ty: &tokio_postgres::types::Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let days_since_pg_epoch = i32::from_be_bytes(raw.try_into()?);
+        Ok(PgDate(days_since_pg_epoch + PG_EPOCH_DAYS))
+    }
+
+    fn accepts(ty: &tokio_postgres::types::Type) -> bool {
+        matches!(*ty, tokio_postgres::types::Type::DATE)
+    }
+}
+
+struct PgTimestamp(i64);
+
+impl<'a> tokio_postgres::types::FromSql<'a> for PgTimestamp {
+    fn from_sql(
+        _ty: &tokio_postgres::types::Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let micros_since_pg_epoch = i64::from_be_bytes(raw.try_into()?);
+        Ok(PgTimestamp(micros_since_pg_epoch + PG_EPOCH_MICROS))
+    }
+
+    fn accepts(ty: &tokio_postgres::types::Type) -> bool {
+        matches!(*ty, tokio_postgres::types::Type::TIMESTAMP)
+    }
+}
+
 fn pg_type_to_data_type(pg_type: &tokio_postgres::types::Type) -> DataType {
     match *pg_type {
         tokio_postgres::types::Type::BOOL => DataType::Bool,
@@ -491,27 +531,20 @@ fn read_cell(row: &tokio_postgres::Row, i: usize, data_type: &DataType) -> Value
         DataType::Int64 => typed!(i64, Int64),
         DataType::Float32 => typed!(f32, Float32),
         DataType::Float64 => typed!(f64, Float64),
+        DataType::Date => {
+            if let Ok(v) = row.try_get::<_, Option<PgDate>>(i) {
+                return v.map(|d| Value::Date(d.0)).unwrap_or(Value::Null);
+            }
+        }
+        DataType::Timestamp => {
+            if let Ok(v) = row.try_get::<_, Option<PgTimestamp>>(i) {
+                return v.map(|t| Value::Timestamp(t.0)).unwrap_or(Value::Null);
+            }
+        }
         DataType::Utf8 => {}
-        DataType::Date => {}
-        DataType::Timestamp => {}
     }
     if let Ok(v) = row.try_get::<_, Option<String>>(i) {
-        // DATE/TIMESTAMP columns arrive as text (no chrono decoding); parse
-        // into the target type so they stay typed end to end.
-        return match data_type {
-            DataType::Date => v
-                .and_then(|s| tpt_stream_columnar::value::parse_date(&s))
-                .map_or(Value::Null, Value::Date),
-            DataType::Timestamp => v
-                .and_then(|s| tpt_stream_columnar::value::parse_timestamp(&s))
-                .map_or(Value::Null, Value::Timestamp),
-            DataType::Bool
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::Float32
-            | DataType::Float64
-            | DataType::Utf8 => v.map(Value::Utf8).unwrap_or(Value::Null),
-        };
+        return v.map(Value::Utf8).unwrap_or(Value::Null);
     }
     Value::Null
 }

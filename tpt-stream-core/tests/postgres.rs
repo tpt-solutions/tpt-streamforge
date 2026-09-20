@@ -107,7 +107,7 @@ fn postgres_sink_handles_nulls_and_special_text() {
     // newline, carriage return, single quote, and an empty field (NULL).
     std::fs::write(
         &csv_path,
-        "id,text\n1,back\\slash\n2,tab\\there\n3,quote's\n4,\n5,line\\nbreak\n",
+        "id,text\n1,back\\slash\n2,tab\there\n3,quote's\n4,\n5,\"line\nbreak\"\n",
     )
     .unwrap();
 

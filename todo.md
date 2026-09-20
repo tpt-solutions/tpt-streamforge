@@ -273,18 +273,27 @@ just documented as an approved exception (unlike the existing build-time-only
 - [x] Drop Arrow interop (`to_arrow()`/`to_pandas()`) from `tpt-stream-py`;
       removes all 11 `arrow`/`arrow-*` crates cleanly (nothing else depends
       on them); `to_pandas()` kept, now via `collect()` + `pandas.DataFrame`
-- [ ] Hand-roll a minimal in-house CSV reader/writer in `tpt-stream-core` to
+- [x] Hand-roll a minimal in-house CSV reader/writer in `tpt-stream-core` to
       replace the `csv`/`csv-core` crates (drops the `ryu` edge from CSV;
-      float formatting via std `to_string()` instead of `ryu`)
+      float formatting via std `to_string()` instead of `ryu`) — landed as
+      the standalone `tpt-csv` crate
 - [ ] Migrate CLI pipeline definitions from YAML (`serde_yaml`) to TOML
       (already permissively licensed, ryu-free) to drop the other `ryu` edge
 - [x] Hand-roll a small recursive-descent SQL parser in `tpt-stream-cli` for
       the existing supported subset (SELECT/filter/group-by/sort/limit) to
       replace `sqlparser`; all 8 existing SQL end-to-end tests pass unchanged
-- [ ] Swap rustls's crypto provider from `ring` to `rustls-rustcrypto`
+- [x] Swap rustls's crypto provider from `ring` to `rustls-rustcrypto`
       (pure-Rust, MIT/Apache-2.0 dual RustCrypto backend) for all HTTPS/cloud
-      TLS in `tpt-stream-core`; note the security trade-off (less
-      battle-tested than `ring`) in CHANGELOG
+      TLS in `tpt-stream-core`. Required dropping `ureq` entirely (Cargo
+      feature unification meant its default `ring`-enabled `rustls` couldn't
+      be overridden from our side) and writing an in-house minimal
+      HTTP/1.1-over-TLS client (`tpt-stream-core/src/httpclient.rs`,
+      GET/PUT/POST/DELETE, streaming fixed-length and chunked bodies, plain
+      HTTP for the Azurite emulator/mock test server). All 70 relevant tests
+      pass (mock S3/Azure/HTTP round-trips, multipart upload, chunked
+      streaming). Security trade-off: `rustls-rustcrypto` is v0.0.2-alpha,
+      far less battle-tested than `ring` (BoringSSL-derived) — accepted
+      per explicit user decision, noted in CHANGELOG.
 - [ ] Investigate whether `target-lexicon` (forced by `pyo3-build-config`,
       build-time only, never ships) can be avoided without dropping PyO3
       entirely; if not avoidable, escalate back to the user rather than
@@ -334,4 +343,38 @@ just documented as an approved exception (unlike the existing build-time-only
       `.tptcol` input; replace with `Result`/`Error::Format` where reachable
 - [ ] Add a regression test feeding a truncated/corrupted `.tptcol` file into
       the columnar reader, asserting a clean error instead of a panic
+
+### tpt-csv: Beyond parity with the `csv` crate (2026-09-20)
+
+`tpt-csv` currently matches the external `csv` crate's design (scalar,
+row-oriented, always-owned `StringRecord`); `tpt-stream-core/src/source.rs`
+already works around that with its own hand-rolled row-major
+`arena`/`cells` table plus a parallel transpose in `build_csv_batch`. Goal:
+move those optimizations into `tpt-csv` itself so it's a genuine
+improvement for any consumer, and delete the workaround code in
+`source.rs`. Full design: `C:\Users\phill\.claude\plans\we-just-created-a-buzzing-sunset.md`.
+
+- [ ] Phase 1: SWAR/word-at-a-time bulk byte scanning in
+      `tpt-csv/src/reader.rs::read_record_raw` (find next `,`/`"`/`\n` a
+      word at a time instead of a branch-per-byte loop); no API/dependency
+      change
+- [ ] Phase 2: `tpt-csv/src/columnar.rs` — `ColumnarReader`/`ColumnarChunk`
+      that parses CSV directly into per-column (SoA) arenas/offsets, with
+      ragged-row staging so a bad row never corrupts already-committed
+      columns; plus a lower-level `Reader::read_record_into(arena, cells)`
+      zero-copy row API. No new dependency on `tpt-stream-columnar`.
+- [ ] Migrate `tpt-stream-core/src/source.rs` (`csv_read_stream`,
+      `csv_reader_to_batches`, `read_csv_batches`/`csv_to_batches`,
+      `build_csv_batch`/`build_csv_column`) to consume `ColumnarReader`,
+      dropping the hand-rolled row-major arena + strided transpose
+- [ ] Phase 3: `tpt_csv::find_chunk_boundaries` (sequential, quote-aware
+      pre-scan for parallel-safe split points); use it in `tpt-stream-core`
+      (already depends on `rayon`) to parallelize the whole-buffer
+      `csv_to_batches` / `read_csv_batches` paths only — the bounded-memory
+      streaming `CsvSource` stays sequential by design
+- [ ] Add `criterion` bench (wide numeric CSV) comparing old vs. new CSV
+      ingestion path in `tpt-stream-core`'s bench suite before/after Phase 2
+- [ ] Add `ColumnarReader`/`find_chunk_boundaries` unit tests (simple/quoted/
+      ragged rows under strict/skip/quarantine; boundaries never split a
+      quoted multi-line field)
 

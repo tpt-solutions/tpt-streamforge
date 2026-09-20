@@ -292,7 +292,9 @@ impl SqlParser {
         } else {
             None
         };
-        if self.peek_keyword("UNION") || self.peek_keyword("INTERSECT") || self.peek_keyword("EXCEPT")
+        if self.peek_keyword("UNION")
+            || self.peek_keyword("INTERSECT")
+            || self.peek_keyword("EXCEPT")
         {
             bail!("UNION/INTERSECT/EXCEPT are not supported");
         }

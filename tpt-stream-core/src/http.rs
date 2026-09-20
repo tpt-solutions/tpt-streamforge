@@ -1,7 +1,8 @@
 //! HTTP(S) source (feature `http`): stream a plain URL as pipeline batches.
 //!
-//! Reuses the `ureq` (rustls TLS) transport from the cloud modules, so no
-//! new dependencies are pulled in beyond `url`. The data format comes from
+//! Reuses the in-house `httpclient` (rustls TLS) transport from the cloud
+//! modules, so no new dependencies are pulled in beyond `url`. The data
+//! format comes from
 //! the URL path's extension (`.csv`, `.jsonl`/`.ndjson`, `.json`,
 //! `.tptcol`), defaulting to CSV; `.gz` URLs are decompressed with the
 //! `gzip` feature.
@@ -77,10 +78,10 @@ fn http_read(
     chunk_rows: usize,
     policy: &ErrorPolicy,
 ) {
-    let agent = ureq::AgentBuilder::new().build();
+    let agent = crate::httpclient::Agent::new();
     let response = match agent.get(url).call() {
         Ok(r) => r,
-        Err(ureq::Error::Status(code, resp)) => {
+        Err(crate::httpclient::Error::Status(code, resp)) => {
             let _ = tx.send(Err(Error::Cloud(format!(
                 "http get {url:?}: status {code}: {}",
                 resp.into_string()
@@ -89,7 +90,7 @@ fn http_read(
             ))));
             return;
         }
-        Err(ureq::Error::Transport(t)) => {
+        Err(crate::httpclient::Error::Transport(t)) => {
             let _ = tx.send(Err(Error::Cloud(format!("http get {url:?}: {t}"))));
             return;
         }

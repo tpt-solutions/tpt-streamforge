@@ -1,8 +1,8 @@
 //! S3-compatible object storage source and sink (feature `s3`).
 //!
 //! Uses [`rusty_s3`](https://docs.rs/rusty-s3) (sans-IO AWS SigV4 signing)
-//! plus `ureq` with rustls for the HTTP transport — a minimal dependency
-//! footprint compared to a full AWS SDK. Works with AWS S3, MinIO,
+//! plus the in-house `httpclient` (rustls TLS) transport — a minimal
+//! dependency footprint compared to a full AWS SDK. Works with AWS S3, MinIO,
 //! LocalStack, Cloudflare R2, and any other S3-compatible endpoint.
 //!
 //! ```no_run
@@ -104,13 +104,12 @@ impl CloudCredentials {
 // Store (signed HTTP plumbing)
 // ---------------------------------------------------------------------------
 
-/// A signed client for one S3 bucket. Cheap to clone; the `ureq` agent pools
-/// connections across calls.
+/// A signed client for one S3 bucket. Cheap to clone.
 #[derive(Clone)]
 pub struct S3Store {
     pub(crate) bucket: Bucket,
     pub(crate) credentials: Credentials,
-    pub(crate) agent: ureq::Agent,
+    pub(crate) agent: crate::httpclient::Agent,
     pub(crate) bucket_url: String,
 }
 
@@ -166,7 +165,7 @@ impl S3Store {
         Ok(S3Store {
             bucket,
             credentials: credentials.to_rusty(),
-            agent: ureq::AgentBuilder::new().build(),
+            agent: crate::httpclient::Agent::new(),
             bucket_url: bucket_url.to_string(),
         })
     }
@@ -318,9 +317,9 @@ impl S3Store {
     }
 }
 
-fn http_error(op: &str, key: &str, err: ureq::Error) -> Error {
+fn http_error(op: &str, key: &str, err: crate::httpclient::Error) -> Error {
     match err {
-        ureq::Error::Status(code, response) => {
+        crate::httpclient::Error::Status(code, response) => {
             let reason = response
                 .into_string()
                 .map(|body| {
@@ -330,7 +329,9 @@ fn http_error(op: &str, key: &str, err: ureq::Error) -> Error {
                 .unwrap_or_else(|_| format!("status {code}"));
             Error::Cloud(format!("{op} {key:?}: {reason}"))
         }
-        ureq::Error::Transport(t) => Error::Cloud(format!("{op} {key:?}: transport: {t}")),
+        crate::httpclient::Error::Transport(t) => {
+            Error::Cloud(format!("{op} {key:?}: transport: {t}"))
+        }
     }
 }
 

@@ -56,8 +56,8 @@ impl BatchEncoder {
         }
         match self.format {
             CloudFormat::Csv => {
-                let mut writer = csv::WriterBuilder::new().from_writer(&mut *out);
-                let mut record = csv::StringRecord::new();
+                let mut writer = tpt_csv::WriterBuilder::new().from_writer(&mut *out);
+                let mut record = tpt_csv::StringRecord::new();
                 if !self.wrote_first {
                     for name in batch.column_names() {
                         record.push_field(name);
@@ -77,7 +77,7 @@ impl BatchEncoder {
                     }
                     writer.write_record(&record).map_err(Error::Csv)?;
                 }
-                // csv::Writer flushes into `out` on drop.
+                // tpt_csv::Writer flushes into `out` on drop.
                 drop(writer);
             }
             CloudFormat::Jsonl => {
