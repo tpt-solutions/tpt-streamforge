@@ -32,7 +32,6 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 serde_yaml = "0.9"
-sqlparser = "0.52"
 indicatif = "0.17"
 
 [dev-dependencies]

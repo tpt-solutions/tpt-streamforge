@@ -12,8 +12,9 @@ Per-package history. The workspace-wide log lives in the
   `read_postgres`/`write_postgres`, `read_s3`/`write_s3`,
   `read_gcs`/`write_gcs`, `read_azure`/`write_azure`, `read_http`,
   `on_error`, `expect`, `explain`, `preview`, `collect`.
-- `to_arrow()` / `to_pandas()` export via arrow's PyArrow FFI (requires the
-  `pyarrow` package at runtime).
+- `to_pandas()` export via `collect()` + `pandas.DataFrame` (requires the
+  `pandas` package at runtime; no Arrow dependency, to keep the dependency
+  tree free of Apache-2.0-only crates).
 - Runs release the GIL (`py.allow_threads`), so other Python threads keep
   executing while a pipeline streams.
 - Progress events, per-stage `stage_stats()`, and date/timestamp columns

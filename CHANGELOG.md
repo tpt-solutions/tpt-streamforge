@@ -78,7 +78,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SELECT` with `WHERE`, `GROUP BY` + `SUM`/`AVG`/`COUNT`/`MIN`/`MAX`,
   aliases, `ORDER BY`, and `LIMIT`, lowered onto filter/aggregate/sort/
   limit stages; unsupported SQL fails explicitly. Backed by the new
-  `Pipeline::limit` stage and `sqlparser` (Apache-2.0).
+  `Pipeline::limit` stage and a small in-house recursive-descent parser
+  (no `sqlparser` dependency, to keep the tree free of Apache-2.0-only
+  crates).
 - **Browser playground** — an interactive in-browser pipeline builder at
   `tpt-stream-wasm/browser/playground/` (filter/map/sort/dedup/aggregate
   stages over pasted CSV, all client-side WebAssembly); built with
@@ -111,8 +113,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.read_postgres`/`.write_postgres`, `.read_s3`/`.write_s3`,
   `.read_gcs`/`.write_gcs`, `.read_azure`/`.write_azure`, `.read_http`,
   `.on_error`, `.expect`, `.explain`, `.preview`, `.collect`,
-  `.to_arrow()`/`.to_pandas()` (via arrow-rs PyArrow FFI), plus
-  `py.allow_threads` around runs so other Python threads keep moving.
+  `.to_pandas()` (via `collect()` + `pandas.DataFrame`, no Arrow
+  dependency), plus `py.allow_threads` around runs so other Python threads
+  keep moving.
 - **Node: JSON input** — `readJsonFile(path)` / `readJsonLinesFile(path)`.
 - **Runnable examples** — csv_to_jsonl, join_two_files, dedup_sort_pipeline,
   telemetry_progress, and an env-gated s3_to_postgres cloud ETL walkthrough;
@@ -130,7 +133,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of silently returning 0 rows (sources are one-shot).
 - Telemetry: `SinkBatch.total_rows` counts rows written (was source rows),
   tail-drained rows (aggregation/sort/join output) now count toward
-  `stage_stats`, and `collect()`/`to_arrow()`/`to_pandas()` include tail rows.
+  `stage_stats`, and `collect()`/`to_pandas()` include tail rows.
 - Python `execute()` releases the GIL while the pipeline streams.
 - PostgreSQL sink retries once on connection loss and shuts down its
   connection driver task on finish.

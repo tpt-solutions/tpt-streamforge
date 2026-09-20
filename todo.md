@@ -255,7 +255,83 @@ Dual-licensed MIT / Apache-2.0 | TPT Solutions
 - [x] SQL frontend (SELECT/project/group-by subset via sqlparser)
 - [x] WASM in-browser playground page
 
+---
 
+## Phase 11: Platform Review Follow-ups (2026-09-20)
 
+### Dependency & License Policy
 
+Audit findings (2026-09-20, `cargo deny list`): Apache-2.0-only (no MIT
+option) crates in the tree were `arrow`/`arrow-*` (11 crates, tpt-stream-py
+only), `ring` (via rustls, used for all HTTPS/cloud TLS), `sqlparser`
+(CLI SQL frontend), `ryu` (transitive via `csv` + `serde_yaml`), and
+`target-lexicon` (build-time only, forced by `pyo3-build-config`). Policy:
+**zero exceptions in production** — every offender must be replaced, not
+just documented as an approved exception (unlike the existing build-time-only
+`cbindgen`/MPL-2.0 exception, which stays as-is since it never ships).
+
+- [x] Drop Arrow interop (`to_arrow()`/`to_pandas()`) from `tpt-stream-py`;
+      removes all 11 `arrow`/`arrow-*` crates cleanly (nothing else depends
+      on them); `to_pandas()` kept, now via `collect()` + `pandas.DataFrame`
+- [ ] Hand-roll a minimal in-house CSV reader/writer in `tpt-stream-core` to
+      replace the `csv`/`csv-core` crates (drops the `ryu` edge from CSV;
+      float formatting via std `to_string()` instead of `ryu`)
+- [ ] Migrate CLI pipeline definitions from YAML (`serde_yaml`) to TOML
+      (already permissively licensed, ryu-free) to drop the other `ryu` edge
+- [x] Hand-roll a small recursive-descent SQL parser in `tpt-stream-cli` for
+      the existing supported subset (SELECT/filter/group-by/sort/limit) to
+      replace `sqlparser`; all 8 existing SQL end-to-end tests pass unchanged
+- [ ] Swap rustls's crypto provider from `ring` to `rustls-rustcrypto`
+      (pure-Rust, MIT/Apache-2.0 dual RustCrypto backend) for all HTTPS/cloud
+      TLS in `tpt-stream-core`; note the security trade-off (less
+      battle-tested than `ring`) in CHANGELOG
+- [ ] Investigate whether `target-lexicon` (forced by `pyo3-build-config`,
+      build-time only, never ships) can be avoided without dropping PyO3
+      entirely; if not avoidable, escalate back to the user rather than
+      silently accepting it as an exception
+- [ ] Once all offenders are resolved, tighten `deny.toml`: remove bare
+      `Apache-2.0` / `Apache-2.0 WITH LLVM-exception` from the allow list so
+      only MIT (or MIT-paired dual licenses) satisfy the check, making this
+      a CI-enforced gate going forward
+- [ ] Fix root `README.md` license section (says "MIT" only; project is
+      dual MIT/Apache-2.0 per `LICENSE-APACHE` and AGENTS.md)
+
+### Adoption & Onboarding
+- [ ] Add CI/crates.io/PyPI/npm/license badges to root `README.md`
+- [ ] Add runnable examples for `tpt-stream-py`, `tpt-stream-wasm`,
+      `tpt-stream-cli` (mirroring `tpt-stream-core/examples`)
+- [ ] Host the built browser playground (`dist/`) as a live demo (e.g. GitHub
+      Pages) and link it from the README
+- [ ] Publish a Docker image (e.g. GHCR) from `release.yml`; document
+      `docker pull` instead of build-from-source only
+- [ ] Add `.github/ISSUE_TEMPLATE/` (bug report + feature request) and a PR
+      template
+- [ ] Surface the Windows wasm test gotcha (`node --test tests/*.test.js`
+      bare-directory failure) directly in `tpt-stream-wasm/README.md`
+
+### Observability
+- [ ] Add `tracing` instrumentation to `tpt-stream-core` pipeline execution,
+      sources, and sinks, feature-gated so wasm's sync/std-only build is
+      unaffected
+- [ ] Optional: opt-in Prometheus/OpenTelemetry exporter in `tpt-stream-cli`
+      fed by existing `Pipeline::stage_stats()`
+
+### Engine Feature Gaps
+- [ ] Parquet read/write (new optional `parquet` feature flag)
+- [ ] Per-row dead-letter queue for stage-level errors (extend quarantine
+      semantics beyond source-level `ErrorPolicy`)
+- [ ] Retry/backoff for network sources & sinks (S3/GCS/Azure/HTTP/Postgres)
+- [ ] Window functions (row_number/rank/running totals) — stretch goal
+- Not planned now (logged as future-phase ideas): Kafka/streaming sources,
+  Delta/Iceberg, Arrow interop, checkpointing/resume
+
+### Hardening
+- [ ] Audit `tpt-stream-py/src/lib.rs` unwraps for panic containment at the
+      Python boundary
+- [ ] Audit `tpt-stream-ffi/src/lib.rs` unwraps (catch_unwind already wraps
+      entry points — verify coverage is complete)
+- [ ] Audit `tpt-stream-columnar/src/format.rs` unwraps for untrusted/corrupt
+      `.tptcol` input; replace with `Result`/`Error::Format` where reachable
+- [ ] Add a regression test feeding a truncated/corrupted `.tptcol` file into
+      the columnar reader, asserting a clean error instead of a panic
 

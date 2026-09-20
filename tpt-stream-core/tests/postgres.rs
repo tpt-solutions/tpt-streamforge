@@ -89,8 +89,8 @@ fn postgres_sink_copy_source_roundtrip() {
     let csv = std::fs::read_to_string(dir.path().join("back.csv")).unwrap();
     let mut lines = csv.lines();
     assert_eq!(lines.next(), Some("id,name,score,active"));
-    assert_eq!(lines.next(), Some("0,name0,0,1"));
-    assert_eq!(lines.next(), Some("1,name1,0.25,0"));
+    assert_eq!(lines.next(), Some("0,name0,0,true"));
+    assert_eq!(lines.next(), Some("1,name1,0.25,false"));
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn postgres_sink_handles_nulls_and_special_text() {
     // newline, carriage return, single quote, and an empty field (NULL).
     std::fs::write(
         &csv_path,
-        "id,text\n1,back\\\\slash\n2,tab\\there\n3,quote's\n4,\n5,line\\nbreak\n",
+        "id,text\n1,back\\slash\n2,tab\\there\n3,quote's\n4,\n5,line\\nbreak\n",
     )
     .unwrap();
 

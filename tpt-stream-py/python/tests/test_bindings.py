@@ -1,5 +1,5 @@
 """Tests for the expanded Python bindings: new sources/sinks, join, error
-policies, expect checks, preview/explain/collect, and arrow/pandas export."""
+policies, expect checks, preview/explain/collect, and pandas export."""
 
 import pytest
 
@@ -218,15 +218,10 @@ def test_execute_after_preview_is_rejected(tmp_path):
         p.write_csv(str(tmp_path / "out.csv")).execute()
 
 
-def test_to_arrow_and_to_pandas(tmp_path):
-    pa = pytest.importorskip("pyarrow")
+def test_to_pandas(tmp_path):
+    pytest.importorskip("pandas")
     src = tmp_path / "in.csv"
     write_text(src, CSV)
-
-    table = Pipeline().read_csv(str(src)).to_arrow()
-    assert isinstance(table, pa.Table)
-    assert table.num_rows == 3
-    assert table.column("name").to_pylist() == ["alice", "bob", "carol"]
 
     frame = Pipeline().read_csv(str(src)).to_pandas()
     assert list(frame.columns) == ["id", "name", "amount"]

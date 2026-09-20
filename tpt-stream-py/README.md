@@ -132,8 +132,8 @@ schema mismatches, or I/O failures.
 - `.explain()` — the stage plan, e.g. `"source -> filter -> sink"`
 - `.preview(n)` — first `n` output rows as dicts (consumes the source)
 - `.collect()` — run and return every output row as a list of dicts
-- `.to_arrow()` / `.to_pandas()` — run and export to a `pyarrow.Table` or
-  pandas DataFrame (requires `pyarrow` at runtime)
+- `.to_pandas()` — run and export to a pandas `DataFrame` (requires
+  `pandas` at runtime; goes through `collect()`, no Arrow dependency)
 
 ### `.num_stages()`
 Number of transformation stages attached so far (for debugging).

@@ -79,18 +79,6 @@ fn pg_type_to_data_type(pg_type: &tokio_postgres::types::Type) -> DataType {
     }
 }
 
-fn infer_from_value(value: &Value) -> DataType {
-    match value {
-        Value::Date(_) => DataType::Date,
-        Value::Timestamp(_) => DataType::Timestamp,
-        Value::Bool(_) => DataType::Bool,
-        Value::Int32(_) | Value::Int64(_) => DataType::Int64,
-        Value::Float32(_) | Value::Float64(_) => DataType::Float64,
-        Value::Utf8(_) => DataType::Utf8,
-        Value::Null => DataType::Utf8,
-    }
-}
-
 fn coerce_to(value: Value, data_type: DataType) -> Value {
     match (value, data_type) {
         (Value::Null, _) => Value::Null,
@@ -442,7 +430,6 @@ fn postgres_read_loop(
     };
 
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(chunk_rows);
-    let mut schema: Option<Vec<DataType>> = None;
     // query_raw returns a RowStream (a Stream, not an Iterator, and !Unpin);
     // pin it and poll with block_on since we're marshalling from a
     // synchronous reader thread.
@@ -461,7 +448,7 @@ fn postgres_read_loop(
         }
         rows.push(values);
         if rows.len() >= chunk_rows {
-            match build_pg_batch(&names, &mut schema, &rows) {
+            match build_pg_batch(&names, &declared, &rows) {
                 Ok(batch) => {
                     if tx.send(Ok(batch)).is_err() {
                         return;
@@ -476,7 +463,7 @@ fn postgres_read_loop(
         }
     }
     if !rows.is_empty() {
-        match build_pg_batch(&names, &mut schema, &rows) {
+        match build_pg_batch(&names, &declared, &rows) {
             Ok(batch) => {
                 let _ = tx.send(Ok(batch));
             }
@@ -531,31 +518,16 @@ fn read_cell(row: &tokio_postgres::Row, i: usize, data_type: &DataType) -> Value
 
 fn build_pg_batch(
     names: &[String],
-    schema: &mut Option<Vec<DataType>>,
+    declared: &[DataType],
     rows: &[Vec<Value>],
 ) -> Result<RecordBatch> {
-    let resolved = match schema {
-        Some(s) => s.clone(),
-        None => {
-            let inferred: Vec<DataType> = names
-                .iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    rows.iter()
-                        .find_map(|row| match &row[i] {
-                            Value::Null => None,
-                            v => Some(infer_from_value(v)),
-                        })
-                        .unwrap_or(DataType::Utf8)
-                })
-                .collect();
-            *schema = Some(inferred.clone());
-            inferred
-        }
-    };
+    // `declared` comes from the query's column metadata (see `pg_type_to_data_type`),
+    // which is authoritative; `read_cell` already produced values in that type, so
+    // this just carries the schema through without re-inferring it from the values
+    // (re-inferring previously widened e.g. INT4 to Int64 via `infer_from_value`).
     let columns = names
         .iter()
-        .zip(&resolved)
+        .zip(declared)
         .enumerate()
         .map(|(i, (name, data_type))| {
             let mut col = Column::new(name.clone(), *data_type, rows.len());

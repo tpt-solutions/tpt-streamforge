@@ -42,8 +42,7 @@ loading whole datasets into memory.
 - **Telemetry** — progress callbacks and per-stage row/elapsed stats in Rust,
   Python (`on_progress`/`stage_stats`), and JavaScript (`onProgress`).
 - **Python** (`tpt-stream-py`) — a `Pipeline` object via PyO3, published to
-  PyPI as `tpt-streamforge`, with `to_arrow()` / `to_pandas()` output via
-  arrow-rs.
+  PyPI as `tpt-streamforge`, with `to_pandas()` output (no Arrow dependency).
 - **JavaScript / WASM** (`tpt-stream-wasm`) — an in-memory `Engine` and fluent
   wrappers for Node (`tpt-streamforge-node`) and browsers
   (`tpt-streamforge-browser`), compiled with wasm-bindgen/wasm-pack.

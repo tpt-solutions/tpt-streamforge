@@ -137,101 +137,6 @@ fn value_to_py(py: Python<'_>, value: &tpt_stream_core::Value) -> PyResult<PyObj
     })
 }
 
-/// Convert a core batch into a pyarrow RecordBatch (requires the `pyarrow`
-/// package at runtime; conversion goes through arrow's PyArrow FFI).
-fn record_batch_to_arrow(
-    py: Python<'_>,
-    batch: &tpt_stream_core::RecordBatch,
-) -> PyResult<PyObject> {
-    use arrow::array::{
-        ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-        RecordBatch as ArrowBatch, StringArray,
-    };
-    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
-    use arrow::pyarrow::IntoPyArrow;
-    use std::sync::Arc;
-
-    let mut fields = Vec::with_capacity(batch.num_columns());
-    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
-    for column in batch.columns() {
-        let arrow_type = match column.data_type() {
-            tpt_stream_core::DataType::Int32 => ArrowDataType::Int32,
-            tpt_stream_core::DataType::Int64 => ArrowDataType::Int64,
-            tpt_stream_core::DataType::Float32 => ArrowDataType::Float32,
-            tpt_stream_core::DataType::Float64 => ArrowDataType::Float64,
-            tpt_stream_core::DataType::Bool => ArrowDataType::Boolean,
-            // Date/timestamp columns export as ISO strings (arrow temporal
-            // types would need a tz-aware schema; strings interop everywhere).
-            tpt_stream_core::DataType::Date | tpt_stream_core::DataType::Timestamp => {
-                ArrowDataType::Utf8
-            }
-            tpt_stream_core::DataType::Utf8 => ArrowDataType::Utf8,
-        };
-        fields.push(Field::new(column.name(), arrow_type.clone(), true));
-        fn typed_values<T, F>(column: &tpt_stream_core::Column, extract: F) -> Vec<Option<T>>
-        where
-            F: Fn(&tpt_stream_core::Value) -> Option<T>,
-        {
-            (0..column.len())
-                .map(|i| column.get(i).and_then(|v| extract(&v)))
-                .collect()
-        }
-        let array: ArrayRef = match column.data_type() {
-            tpt_stream_core::DataType::Int32 => {
-                Arc::new(Int32Array::from(typed_values(column, |v| match v {
-                    tpt_stream_core::Value::Int32(x) => Some(*x),
-                    _ => None,
-                })))
-            }
-            tpt_stream_core::DataType::Int64 => {
-                Arc::new(Int64Array::from(typed_values(column, |v| match v {
-                    tpt_stream_core::Value::Int64(x) => Some(*x),
-                    _ => None,
-                })))
-            }
-            tpt_stream_core::DataType::Float32 => {
-                Arc::new(Float32Array::from(typed_values(column, |v| match v {
-                    tpt_stream_core::Value::Float32(x) => Some(*x),
-                    _ => None,
-                })))
-            }
-            tpt_stream_core::DataType::Float64 => {
-                Arc::new(Float64Array::from(typed_values(column, |v| match v {
-                    tpt_stream_core::Value::Float64(x) => Some(*x),
-                    _ => None,
-                })))
-            }
-            tpt_stream_core::DataType::Bool => {
-                Arc::new(BooleanArray::from(typed_values(column, |v| match v {
-                    tpt_stream_core::Value::Bool(x) => Some(*x),
-                    _ => None,
-                })))
-            }
-            tpt_stream_core::DataType::Date | tpt_stream_core::DataType::Timestamp => {
-                Arc::new(StringArray::from(typed_values(column, |v| match v {
-                    tpt_stream_core::Value::Date(_) | tpt_stream_core::Value::Timestamp(_) => {
-                        Some(v.to_string())
-                    }
-                    _ => None,
-                })))
-            }
-            tpt_stream_core::DataType::Utf8 => {
-                Arc::new(StringArray::from(typed_values(column, |v| match v {
-                    tpt_stream_core::Value::Utf8(x) => Some(x.clone()),
-                    _ => None,
-                })))
-            }
-        };
-        arrays.push(array);
-    }
-
-    let arrow_batch = ArrowBatch::try_new(Arc::new(ArrowSchema::new(fields)), arrays)
-        .map_err(|e| TptError::new_err(format!("arrow conversion: {e}")))?;
-    arrow_batch
-        .into_pyarrow(py)
-        .map_err(|e| TptError::new_err(format!("pyarrow FFI: {e}")))
-}
-
 #[pyclass(name = "Pipeline")]
 struct PyPipeline {
     inner: Mutex<Pipeline>,
@@ -826,29 +731,14 @@ impl PyPipeline {
         Ok(out)
     }
 
-    /// Run the pipeline and return the result as a `pyarrow.Table`
-    /// (requires the `pyarrow` package at runtime).
-    fn to_arrow(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let batches = self.collect_batches(py)?;
-        let pa = py.import("pyarrow").map_err(|_| {
-            TptError::new_err("to_arrow requires the 'pyarrow' package: pip install pyarrow")
-        })?;
-        let from_batches = pa
-            .getattr("Table")
-            .and_then(|t| t.getattr("from_batches"))
-            .map_err(py_err)?;
-        let objects: Vec<PyObject> = batches
-            .iter()
-            .map(|b| record_batch_to_arrow(py, b))
-            .collect::<PyResult<_>>()?;
-        let table = from_batches.call1((objects,)).map_err(py_err)?;
-        Ok(table.unbind())
-    }
-
-    /// Run the pipeline and return a pandas DataFrame (requires `pyarrow`).
+    /// Run the pipeline and return a pandas DataFrame (requires `pandas`;
+    /// goes through `collect()` + `pandas.DataFrame`, no Arrow dependency).
     fn to_pandas(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let table = self.to_arrow(py)?;
-        let frame = table.bind(py).call_method0("to_pandas")?;
+        let rows = self.collect(py)?;
+        let pd = py.import("pandas").map_err(|_| {
+            TptError::new_err("to_pandas requires the 'pandas' package: pip install pandas")
+        })?;
+        let frame = pd.getattr("DataFrame").and_then(|c| c.call1((rows,))).map_err(py_err)?;
         Ok(frame.unbind())
     }
 
