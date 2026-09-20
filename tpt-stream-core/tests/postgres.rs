@@ -2,19 +2,14 @@
 //!
 //! Skipped unless `TPT_TEST_POSTGRES_URL` is set, e.g.
 //! `postgres://postgres:postgres@localhost:5432/postgres`.
-//! CI runs them against a Postgres service container; locally without
-//! Postgres they print a note and pass.
+//! The `postgres-integration` CI job sets this against a Postgres service
+//! container; other jobs (and local runs without Postgres) leave it unset,
+//! so these tests print a note and pass.
 #![cfg(all(feature = "async", feature = "postgres"))]
 use tpt_stream_core::{Pipeline, PostgresSink, PostgresSource, Source, Value};
 
 fn postgres_url() -> Option<String> {
-    std::env::var("TPT_TEST_POSTGRES_URL").ok().or_else(|| {
-        if std::env::var("CI").is_ok() {
-            Some("postgres://postgres:postgres@localhost:5432/postgres".into())
-        } else {
-            None
-        }
-    })
+    std::env::var("TPT_TEST_POSTGRES_URL").ok()
 }
 
 fn runtime() -> tokio::runtime::Runtime {

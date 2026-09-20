@@ -165,6 +165,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exception scoped to the build-time `cbindgen` header generator, and
   explicit versions on the workspace path dependencies (satisfies
   `bans.wildcards = "deny"`).
+- **`pyo3` bumped 0.23 → 0.29** (`tpt-stream-py`) to clear two RustSec
+  advisories (buffer overflow in `PyString::from_object`, missing `Sync`
+  bound on `PyCFunction::new_closure`); migrated `PyObject` → `Py<PyAny>`,
+  `Python::with_gil` → `Python::attach`, `Python::allow_threads` →
+  `Python::detach` throughout the bindings.
+- **`rusty-s3` bumped 0.7 → 0.10** (`tpt-stream-core`, `s3`/`gcs` features)
+  to clear two `quick-xml` denial-of-service advisories; the crate now
+  parses S3 XML responses with `instant-xml` instead, which is stricter
+  about the S3 response namespace (`CreateMultipartUpload::parse_response`
+  call site updated accordingly).
+- `deny.toml` ignores three `rustls-webpki`/`rsa` advisories and one
+  `paste` unmaintained advisory, all pinned transitively by
+  `rustls-rustcrypto` 0.0.2-alpha (still its only release, no fix
+  available) and none reachable through our client-only TLS usage — see
+  the comments in `deny.toml` for the per-advisory rationale.
 
 ## [0.1.0] - placeholder
 

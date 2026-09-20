@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       localstack:
-        image: localstack/localstack:latest
+        image: localstack/localstack:3.8
         ports:
           - 4566:4566
         env:
@@ -100,7 +100,7 @@ jobs:
           --health-cmd "curl -f http://localhost:4566/_localstack/health || exit 1"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 15
       azurite:
         image: mcr.microsoft.com/azure-storage/azurite:latest
         ports:

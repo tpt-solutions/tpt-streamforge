@@ -20,6 +20,13 @@ Per-package history. The workspace-wide log lives in the
 - Progress events, per-stage `stage_stats()`, and date/timestamp columns
   (rendered as ISO strings).
 
+### Changed
+- `pyo3` bumped 0.23 → 0.29 to clear two RustSec advisories (buffer
+  overflow in `PyString::from_object`, missing `Sync` bound on
+  `PyCFunction::new_closure`): `PyObject` → `Py<PyAny>`,
+  `Python::with_gil` → `Python::attach`, `py.allow_threads` →
+  `py.detach`.
+
 ## [0.1.0] - 2026
 Initial PyO3 package: fluent `Pipeline` (read_csv, filter, map, group_by +
 agg, sort, dedup, write_csv, execute), `TptError`, abi3 wheels via maturin.

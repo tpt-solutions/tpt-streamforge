@@ -25,6 +25,12 @@ the [root CHANGELOG](../CHANGELOG.md).
 - Re-running an executed pipeline errors instead of silently yielding 0 rows.
 - `SinkBatch.total_rows` counts rows written to the sink.
 
+### Changed
+- `rusty-s3` bumped 0.7 → 0.10 (`s3`/`gcs` features) to clear two
+  `quick-xml` denial-of-service RustSec advisories; it now parses S3 XML
+  responses with `instant-xml`, which enforces the S3 response namespace
+  more strictly than `quick-xml` did.
+
 ## [0.1.0] - 2026
 
 Initial engine: streaming CSV/JSONL/JSON + `.tptcol` I/O, filter/map/select,

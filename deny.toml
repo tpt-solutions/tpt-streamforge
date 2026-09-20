@@ -35,3 +35,29 @@ unknown-git = "deny"
 
 [advisories]
 yanked = "deny"
+# rustls-rustcrypto 0.0.2-alpha (our pure-Rust, MIT/Apache-2.0 crypto
+# provider for rustls, chosen over `ring`'s OpenSSL-derived/Apache-2.0-only
+# license — see the `http`/`s3`/`azure` features in tpt-stream-core) pins
+# rustls-webpki 0.102.8, paste 1.0.15, and rsa 0.9.10 with no newer release
+# to update to (last published 2024-04-24; still the crate's only release).
+# Ignored here because none is reachable through how we use it:
+ignore = [
+    # `paste` is a transitive macro-only build dependency of the RustCrypto
+    # crates rustls-rustcrypto composes (aes-gcm, ed25519-dalek, p256, ...);
+    # no runtime attack surface, unmaintained status only.
+    "RUSTSEC-2024-0436",
+    # The following four are all rustls-webpki 0.102.8 advisories reachable
+    # only via a misissued CA cert (wildcard/URI name constraints) or CRL
+    # parsing; we use webpki solely to verify server certs on outbound TLS
+    # connections to configured S3/GCS/Azure endpoints and never parse CRLs.
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    # Marvin Attack timing side-channel in rsa 0.9.10, with no patched
+    # version released upstream. Only exploitable against code holding and
+    # operating on an RSA private key; we only use rsa to verify RSA
+    # signatures on server certs during the TLS handshake, never to hold or
+    # operate on a private key.
+    "RUSTSEC-2023-0071",
+]

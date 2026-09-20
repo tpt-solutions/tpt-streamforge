@@ -264,7 +264,7 @@ fn s3_sink_multipart_via_mock() {
         } else if req.method == "POST" {
             // CreateMultipartUpload
             MockResponse::ok(
-                b"<InitiateMultipartUploadResult><UploadId>UPLOAD-1</UploadId></InitiateMultipartUploadResult>"
+                b"<InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><UploadId>UPLOAD-1</UploadId></InitiateMultipartUploadResult>"
                     .to_vec(),
             )
         } else if req.method == "PUT" && req.query.contains("partNumber=") {

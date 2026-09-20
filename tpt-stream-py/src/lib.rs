@@ -107,7 +107,7 @@ fn parse_error_policy(text: &str) -> PyResult<ErrorPolicy> {
 }
 
 /// Convert one core value into a Python object.
-fn value_to_py(py: Python<'_>, value: &tpt_stream_core::Value) -> PyResult<PyObject> {
+fn value_to_py(py: Python<'_>, value: &tpt_stream_core::Value) -> PyResult<Py<PyAny>> {
     use tpt_stream_core::Value;
     Ok(match value {
         Value::Null => py.None(),
@@ -140,7 +140,7 @@ fn value_to_py(py: Python<'_>, value: &tpt_stream_core::Value) -> PyResult<PyObj
 #[pyclass(name = "Pipeline")]
 struct PyPipeline {
     inner: Mutex<Pipeline>,
-    progress: Mutex<Option<PyObject>>,
+    progress: Mutex<Option<Py<PyAny>>>,
 }
 
 impl PyPipeline {
@@ -160,7 +160,7 @@ impl PyPipeline {
         if let Some(callback) = callback {
             let mut inner = self.inner.lock().unwrap();
             inner.on_progress(Arc::new(move |event| {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     let dict = event_to_dict(py, event);
                     if let Err(err) = callback.call1(py, (dict,)) {
                         eprintln!("tpt_streamforge: progress callback raised: {err}");
@@ -172,7 +172,7 @@ impl PyPipeline {
             .enable_all()
             .build()
             .map_err(|e| TptError::new_err(format!("failed to build runtime: {e}")))?;
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut inner = self.inner.lock().unwrap();
             runtime.block_on(inner.collect())
         })
@@ -209,7 +209,7 @@ impl PyPipeline {
     /// Register a progress callback: `callback(event_dict)` is invoked for
     /// every source batch, stage output, sink write, and at completion.
     /// Event kinds: `source_batch`, `stage_batch`, `sink_batch`, `done`.
-    fn on_progress(slf: Bound<'_, Self>, callback: PyObject) -> PyResult<Py<Self>> {
+    fn on_progress(slf: Bound<'_, Self>, callback: Py<PyAny>) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
             *cell.progress.lock().unwrap() = Some(callback);
@@ -353,7 +353,7 @@ impl PyPipeline {
                 .map(|c| c.clone_ref(py));
             if let Some(callback) = callback {
                 inner.on_progress(Arc::new(move |event| {
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         let dict = event_to_dict(py, event);
                         if let Err(err) = callback.call1(py, (dict,)) {
                             // A raising callback must not abort the pipeline;
@@ -371,7 +371,7 @@ impl PyPipeline {
         // Release the GIL so other Python threads keep running while the
         // pipeline streams. The progress hook re-acquires it per event.
         let stats = py
-            .allow_threads(|| {
+            .detach(|| {
                 let mut inner = self.inner.lock().unwrap();
                 runtime.block_on(inner.execute())
             })
@@ -694,7 +694,7 @@ impl PyPipeline {
             .build()
             .map_err(|e| TptError::new_err(format!("failed to build runtime: {e}")))?;
         let batches = py
-            .allow_threads(|| {
+            .detach(|| {
                 let mut inner = self.inner.lock().unwrap();
                 runtime.block_on(inner.preview(n))
             })
@@ -733,7 +733,7 @@ impl PyPipeline {
 
     /// Run the pipeline and return a pandas DataFrame (requires `pandas`;
     /// goes through `collect()` + `pandas.DataFrame`, no Arrow dependency).
-    fn to_pandas(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn to_pandas(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let rows = self.collect(py)?;
         let pd = py.import("pandas").map_err(|_| {
             TptError::new_err("to_pandas requires the 'pandas' package: pip install pandas")

@@ -237,7 +237,7 @@ impl S3Store {
                 "s3 create multipart upload {key:?}: read body: {e}"
             ))
         })?;
-        CreateMultipartUpload::parse_response(body.as_bytes())
+        CreateMultipartUpload::parse_response(&body)
             .map(|r| r.upload_id().to_string())
             .map_err(|e| {
                 Error::Cloud(format!(
