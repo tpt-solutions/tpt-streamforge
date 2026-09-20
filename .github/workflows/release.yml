@@ -35,7 +35,7 @@ jobs:
           python -m pip install --quiet pytest
           python -m pip install --quiet dist/tpt_streamforge-*.whl
           python -m pytest tpt-stream-py/python/tests -q
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
