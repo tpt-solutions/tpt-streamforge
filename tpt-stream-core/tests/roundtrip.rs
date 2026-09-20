@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tpt_stream_core::{Column, DataType, Pipeline, RecordBatch, Value};
+use tpt_stream_core::{Column, DataType, Pipeline, PipelineStats, RecordBatch, Value};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 

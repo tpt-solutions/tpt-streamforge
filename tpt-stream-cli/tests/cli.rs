@@ -211,7 +211,10 @@ async fn starter_template_runs_end_to_end() {
     let toml = text
         .replace("\"input.csv\"", &format!("\"{}\"", toml_path(&in_csv)))
         .replace("\"output.csv\"", &format!("\"{}\"", toml_path(&out_csv)));
-    assert!(toml.contains("input.csv") == false, "template input path not substituted");
+    assert!(
+        !toml.contains("\"input.csv\""),
+        "template input path not substituted"
+    );
 
     write(&in_csv, "region,amount\nemea,10\nemea,5\namer,7\n");
     let pipeline_file = dir.path().join("pipeline.toml");
