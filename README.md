@@ -1,5 +1,12 @@
 # tpt-streamforge
 
+[![CI](https://github.com/tpt-solutions/tpt-streamforge/actions/workflows/ci.yml/badge.svg)](https://github.com/tpt-solutions/tpt-streamforge/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/tpt-stream-core.svg)](https://crates.io/crates/tpt-stream-core)
+[![PyPI](https://img.shields.io/pypi/v/tpt-streamforge.svg)](https://pypi.org/project/tpt-streamforge/)
+[![npm (node)](https://img.shields.io/npm/v/tpt-streamforge-node.svg?label=npm%20(node))](https://www.npmjs.com/package/tpt-streamforge-node)
+[![npm (browser)](https://img.shields.io/npm/v/tpt-streamforge-browser.svg?label=npm%20(browser))](https://www.npmjs.com/package/tpt-streamforge-browser)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A SQL-lite-free streaming transformation engine for tabular data, written in
 Rust with bindings for Python and JavaScript/WASM. Push columnar batches through
 a pipeline of `filter` / `map` / `sort` / `dedup` / `aggregate` stages without
@@ -25,8 +32,8 @@ loading whole datasets into memory.
   Cloud Storage via the S3 XML API + HMAC keys (`gcs`), and Azure Blob with
   Shared Key auth (`azure`); multipart/block streaming uploads, no cloud SDK
   dependency.
-- **CLI** (`tpt-stream-cli`) — `tptforge run pipeline.yaml` runs streaming
-  ETL from a YAML file; `tptforge schema` / `tptforge preview` inspect data;
+- **CLI** (`tpt-stream-cli`) — `tptforge run pipeline.toml` runs streaming
+  ETL from a TOML file; `tptforge schema` / `tptforge preview` inspect data;
   **`tptforge sql`** answers single-table `SELECT ... WHERE ... GROUP BY ...
   ORDER BY ... LIMIT` queries straight from the engine. Dockerfile included;
   see [tpt-stream-cli/README.md](tpt-stream-cli/README.md).
@@ -35,8 +42,10 @@ loading whole datasets into memory.
   literals in expressions, and stored natively in `.tptcol`, SQLite,
   PostgreSQL, and cloud sinks.
 - **Browser playground** — try the engine in your browser at
-  `tpt-stream-wasm/browser/playground/` (`npm run build:playground` then
-  `npm run serve:playground`); all processing runs locally in WebAssembly.
+  [tpt-solutions.github.io/tpt-streamforge](https://tpt-solutions.github.io/tpt-streamforge/)
+  (deployed from `tpt-stream-wasm/browser/playground/` by the Pages workflow),
+  or build it locally with `npm run build:playground` then
+  `npm run serve:playground`; all processing runs locally in WebAssembly.
 - **Robust inputs** — gzip (`csv.gz`), plain HTTP(S) URLs, and error
   policies (`strict` / `skip` / `quarantine:bad.csv`) for malformed rows.
 - **Telemetry** — progress callbacks and per-stage row/elapsed stats in Rust,
@@ -54,12 +63,13 @@ loading whole datasets into memory.
 | --- | --- | --- |
 | `tpt-stream-core` | Rust | streaming engine; async by default, sync-only build for wasm |
 | `tpt-stream-columnar` | Rust | native columnar format (`.tptcol`) + optional zstd |
+| `tpt-csv` | Rust | in-house zero-dependency streaming CSV reader/writer |
 | `tpt-stream-ffi` | Rust/C | C ABI over the core |
 | `tpt-stream-py` | Python | `pip install tpt-streamforge` |
 | `tpt-stream-wasm/node` | Node.js | `npm install tpt-streamforge-node` |
 | `tpt-stream-wasm/browser` | Browser | `npm install tpt-streamforge-browser` |
 | `tpt-stream-cli` | Rust | `tptforge` CLI; `cargo install --path tpt-stream-cli` |
-| `templates/pipeline-starter` | YAML | copy-paste template for new pipelines |
+| `templates/pipeline-starter` | TOML | copy-paste template for new pipelines |
 
 ## Quick start
 
@@ -103,12 +113,12 @@ const csv = p.filter('amount > 10').toCSV();
 ### CLI (no code required)
 
 ```sh
-tptforge run pipeline.yaml        # YAML: source -> stages -> sink
+tptforge run pipeline.toml        # TOML: source -> stages -> sink
 tptforge schema data.csv.gz       # inferred column types
 tptforge preview data.csv -n 20   # first rows
 ```
 
-See [tpt-stream-cli/README.md](tpt-stream-cli/README.md) for the full YAML
+See [tpt-stream-cli/README.md](tpt-stream-cli/README.md) for the full TOML
 reference, or start from the annotated template in
 [templates/pipeline-starter](templates/pipeline-starter).
 
@@ -116,7 +126,7 @@ reference, or start from the annotated template in
 
 ```sh
 docker build -t tptforge .
-docker run --rm -v "$PWD:/data" tptforge run pipeline.yaml
+docker run --rm -v "$PWD:/data" tptforge run pipeline.toml
 ```
 
 ### Rust
@@ -197,10 +207,25 @@ and CSV→CSV numbers above.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Phases and status live in
 [todo.md](todo.md). Common recipes (`fmt`, `test`, `clippy`, `deny`, `bench`,
 `ci`, and the Python/wasm builds) are in the [justfile](justfile) — run
-`just` to list them. More end-to-end examples live in
+`just` to list them. Runnable end-to-end examples live in
 [tpt-stream-core/examples](tpt-stream-core/examples) (CSV→JSONL, dedup+sort,
-join, S3→Postgres, telemetry).
+join, S3→Postgres, telemetry),
+[tpt-stream-py/examples](tpt-stream-py/examples),
+[tpt-stream-cli/examples](tpt-stream-cli/examples), and
+[tpt-stream-wasm/examples](tpt-stream-wasm/examples).
 
 ## License
 
-MIT
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in this project shall be dual-licensed as
+above, without any additional terms or conditions.
+
+The dependency tree is kept permissive and, for everything that ships, MIT-only
+consumable: crates offered under Apache-2.0 *without* an MIT option are not
+used. `cargo-deny` enforces this in CI (`deny.toml`); the remaining build-time
+tools are documented in [CHANGELOG.md](CHANGELOG.md).

@@ -49,3 +49,21 @@ both packages.
 cd node    && npm test   # node:test, includes telemetry + JSON reader tests
 cd browser && npm ci && npm test   # webpack-bundled harness
 ```
+
+### Windows: run `npm test`, not `node --test tests/`
+
+The `node` package's test script is `node --test tests/*.test.js`. On Windows,
+passing a bare directory (`node --test tests/`) fails — Node treats it as a
+missing module instead of globbing it — and quoting the glob (`"tests/*.test.js"`)
+hands the pattern to Node unexpanded, which fails the same way. Always go
+through the glob in `package.json`:
+
+```sh
+cd tpt-stream-wasm/node
+npm test                              # correct on every platform
+node --test tests/*.test.js           # correct from PowerShell/cmd too
+node --test                           # also fine: Node discovers *.test.js below cwd
+```
+
+The same applies to a single file: `node --test tests/pipeline.test.js` works,
+`node --test tests` does not.

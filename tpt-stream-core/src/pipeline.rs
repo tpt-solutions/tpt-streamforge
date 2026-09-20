@@ -80,6 +80,11 @@ impl Pipeline {
     /// Read the first `rows` output rows through the attached stages without
     /// running the whole pipeline. Consumes the source (the pipeline must be
     /// rebuilt afterwards, like after `execute`). Sinks are not touched.
+    ///
+    /// Buffering stages (external sort, dedup, hash join, group-by) emit
+    /// nothing until the source is exhausted, so once the source runs dry the
+    /// stage tails are drained in pipeline order — the same finalization
+    /// [`Pipeline::execute`] performs — until `rows` output rows are available.
     pub async fn preview(&mut self, rows: usize) -> Result<Vec<RecordBatch>> {
         if let Some(err) = self.pending_error.take() {
             return Err(Error::Schema(err));
@@ -95,8 +100,13 @@ impl Pipeline {
             .ok_or_else(|| Error::Config("pipeline has no source".into()))?;
         let mut collected: Vec<RecordBatch> = Vec::new();
         let mut count = 0usize;
+        // `true` once the source signalled EOF (as opposed to `rows` already
+        // being satisfied by streaming stages), which is when buffered stage
+        // tails become available.
+        let mut exhausted = false;
         while count < rows {
             let Some(batch) = source.next_batch().await? else {
+                exhausted = true;
                 break;
             };
             let mut current = vec![batch];
@@ -117,6 +127,34 @@ impl Pipeline {
                 }
                 count += b.num_rows();
                 collected.push(b);
+            }
+        }
+
+        if exhausted && count < rows {
+            #[allow(clippy::needless_range_loop)]
+            for i in 0..self.stages.len() {
+                if count >= rows {
+                    break;
+                }
+                let mut current = self.stages[i].finish().await?;
+                for stage in self.stages.iter_mut().skip(i + 1) {
+                    let mut next = Vec::new();
+                    for b in current {
+                        next.extend(stage.process(b).await?);
+                    }
+                    current = next;
+                }
+                for mut b in current {
+                    if count >= rows {
+                        break;
+                    }
+                    let take = rows - count;
+                    if b.num_rows() > take {
+                        b.truncate(take);
+                    }
+                    count += b.num_rows();
+                    collected.push(b);
+                }
             }
         }
         self.executed = true;

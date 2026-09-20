@@ -1,0 +1,11 @@
+order_id,region,amount,status
+1001,emea,120.5,paid
+1002,amer,88.0,paid
+1003,emea,0,refunded
+1004,apac,310.25,paid
+1005,amer,42.5,pending
+1006,emea,15.75,paid
+1007,apac,7.0,paid
+1008,amer,0,refunded
+1009,emea,231.0,paid
+1010,apac,64.5,pending

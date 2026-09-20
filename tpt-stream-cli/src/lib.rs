@@ -1,20 +1,32 @@
-//! `tptforge`: YAML-driven ETL pipelines on the tpt-streamforge engine.
+//! `tptforge`: TOML-driven ETL pipelines on the tpt-streamforge engine.
 //!
 //! A pipeline file lists a `source`, optional `stages`, and an optional
 //! `sink`:
 //!
-//! ```yaml
-//! source:
-//!   csv: { path: in.csv }
-//! stages:
-//!   - filter: "amount > 0"
-//!   - aggregate: { group_by: [region], aggs: { amount: sum, id: count_all } }
-//!   - sort: { columns: [sum_amount], descending: true }
-//! sink:
-//!   csv: out.csv
+//! ```toml
+//! [source.csv]
+//! path = "in.csv"
+//!
+//! [[stages]]
+//! filter = "amount > 0"
+//!
+//! [[stages]]
+//! [stages.aggregate]
+//! group_by = ["region"]
+//! [stages.aggregate.aggs]
+//! amount = "sum"
+//! id = "count_all"
+//!
+//! [[stages]]
+//! [stages.sort]
+//! columns = ["sum_amount"]
+//! descending = true
+//!
+//! [sink]
+//! csv = "out.csv"
 //! ```
 //!
-//! Run it with `tptforge run pipeline.yaml`. `tptforge schema FILE` prints
+//! Run it with `tptforge run pipeline.toml`. `tptforge schema FILE` prints
 //! the inferred column types; `tptforge preview FILE -n 10` prints the first
 //! rows. Sources and sinks cover local files (CSV/JSONL/JSON/`.tptcol`,
 //! `.gz`-compressed), SQLite, PostgreSQL, S3/GCS/Azure, and plain HTTP URLs.
@@ -39,16 +51,14 @@ use tpt_stream_core::{Check, Pipeline, RecordBatch};
 // Pipeline file schema
 // ---------------------------------------------------------------------------
 
-/// serde_yaml 0.9 needs `!tag` syntax for serde's externally tagged enums;
-/// users should be able to write plain `csv: {...}` keys instead, so the
-/// three spec enums below deserialize by hand: exactly one key selects the
-/// variant, and the value deserializes into that variant's struct.
-fn one_key(
-    value: serde_yaml::Value,
-    what: &str,
-) -> std::result::Result<(String, serde_yaml::Value), String> {
+/// TOML has no `!tag` syntax for serde's externally tagged enums; users
+/// should be able to write plain `csv = "in.csv"` / `[source.csv]` keys
+/// instead, so the three spec enums below deserialize by hand: exactly one
+/// key selects the variant, and the value deserializes into that variant's
+/// struct (or, for the path shorthands, straight into a string).
+fn one_key(value: toml::Value, what: &str) -> std::result::Result<(String, toml::Value), String> {
     match value {
-        serde_yaml::Value::Mapping(map) => {
+        toml::Value::Table(map) => {
             if map.len() != 1 {
                 Err(format!(
                     "{what} must have exactly one key, found {}",
@@ -56,25 +66,21 @@ fn one_key(
                 ))
             } else {
                 let (k, v) = map.into_iter().next().expect("len checked");
-                let key = k
-                    .as_str()
-                    .ok_or_else(|| format!("{what} key must be a string"))?
-                    .to_string();
-                Ok((key, v))
+                Ok((k, v))
             }
         }
-        other => Err(format!(
-            "{what} must be a mapping with one key, got {other:?}"
-        )),
+        other => Err(format!("{what} must be a table with one key, got {other:?}")),
     }
 }
 
 fn variant<T: serde::de::DeserializeOwned>(
     key: &str,
-    value: serde_yaml::Value,
+    value: toml::Value,
     what: &str,
 ) -> std::result::Result<T, String> {
-    serde_yaml::from_value(value).map_err(|e| format!("invalid {what} {key:?}: {e}"))
+    value
+        .try_into()
+        .map_err(|e| format!("invalid {what} {key:?}: {e}"))
 }
 
 macro_rules! keyed_enum {
@@ -85,7 +91,7 @@ macro_rules! keyed_enum {
                 D: serde::Deserializer<'de>,
             {
                 use serde::de::Error as _;
-                let (key, value) = one_key(serde_yaml::Value::deserialize(deserializer)?, $what)
+                let (key, value) = one_key(toml::Value::deserialize(deserializer)?, $what)
                     .map_err(D::Error::custom)?;
                 match key.as_str() {
                     $(
@@ -104,7 +110,7 @@ macro_rules! keyed_enum {
     };
 }
 
-/// The parsed `pipeline.yaml`.
+/// The parsed `pipeline.toml`.
 #[derive(Debug, Deserialize)]
 pub struct PipelineSpec {
     pub source: SourceSpec,
@@ -129,8 +135,8 @@ pub enum SourceSpec {
     Azure(AzureObjectSpec),
 }
 
-/// Accept either `csv: out.csv` (scalar path shorthand) or
-/// `csv: { path: out.csv }`.
+/// Accept either `csv = "out.csv"` (scalar path shorthand) or
+/// `[csv]` with `path = "out.csv"`.
 #[derive(Debug, Deserialize)]
 #[serde(from = "PathOrSpec")]
 pub struct PathOnlySpec {
@@ -565,7 +571,7 @@ fn apply_sink(pipeline: &mut Pipeline, sink: &SinkSpec) -> Result<()> {
 #[command(
     name = "tptforge",
     version,
-    about = "Streaming ETL pipelines from a YAML file, powered by tpt-streamforge"
+    about = "Streaming ETL pipelines from a TOML file, powered by tpt-streamforge"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -574,9 +580,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run a pipeline defined in a YAML file.
+    /// Run a pipeline defined in a TOML file.
     Run {
-        /// Path to the pipeline YAML file.
+        /// Path to the pipeline TOML file.
         pipeline: PathBuf,
         /// Hide the progress bar.
         #[arg(long)]
@@ -675,7 +681,16 @@ pub async fn sql_command(
 pub async fn run_command(pipeline_path: &std::path::Path, quiet: bool) -> Result<String> {
     let text = std::fs::read_to_string(pipeline_path)
         .with_context(|| format!("reading pipeline file {}", pipeline_path.display()))?;
-    let spec: PipelineSpec = serde_yaml::from_str(&text).context("parsing pipeline YAML")?;
+    if is_yaml_path(pipeline_path) {
+        bail!(
+            "{} looks like a YAML pipeline, but pipeline files are TOML now \
+             (the YAML reader pulled in an Apache-2.0-only dependency); \
+             see tpt-stream-cli/README.md for the TOML layout",
+            pipeline_path.display()
+        );
+    }
+    let spec: PipelineSpec = parse_pipeline_toml(&text)
+        .with_context(|| format!("parsing pipeline TOML {}", pipeline_path.display()))?;
     let mut pipeline = build_pipeline(&spec)?;
     if !quiet {
         attach_progress(&mut pipeline);
@@ -686,6 +701,15 @@ pub async fn run_command(pipeline_path: &std::path::Path, quiet: bool) -> Result
         stats.rows, stats.batches, stats.bytes_out, stats.elapsed
     ))
 }
+
+/// Whether a path uses one of the retired YAML pipeline extensions.
+fn is_yaml_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml")
+    )
+}
+
 
 /// Inspect a file/URL: read the first `rows` output rows through the
 /// format's native reader.
@@ -745,7 +769,7 @@ pub async fn preview_command(input: &str, num: usize) -> Result<String> {
     Ok(tpt_stream_core::source::batches_to_csv(&batches))
 }
 
-/// Parse a YAML pipeline (exposed for tests and embedders).
-pub fn parse_pipeline_yaml(text: &str) -> Result<PipelineSpec> {
-    serde_yaml::from_str(text).context("parsing pipeline YAML")
+/// Parse a TOML pipeline definition (exposed for tests and embedders).
+pub fn parse_pipeline_toml(text: &str) -> Result<PipelineSpec> {
+    toml::from_str(text).context("parsing pipeline TOML")
 }

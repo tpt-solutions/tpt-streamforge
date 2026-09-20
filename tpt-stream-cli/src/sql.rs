@@ -264,7 +264,7 @@ impl SqlParser {
             .context("query needs a FROM clause")?;
         let path = self.parse_table()?;
         if self.peek_keyword("JOIN") {
-            bail!("SQL JOIN is not supported (use the join stage in YAML)");
+            bail!("SQL JOIN is not supported (use the join stage in a pipeline TOML)");
         }
         let selection = if self.peek_keyword("WHERE") {
             self.advance();

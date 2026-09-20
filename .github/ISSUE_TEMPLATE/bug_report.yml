@@ -1,0 +1,73 @@
+name: Bug report
+description: Something is wrong — a panic, a wrong result, or a build failure.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please fill in the fields below; a minimal
+        reproduction (a few rows of CSV and the pipeline that misbehaves) gets
+        a fix much faster.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface?
+      description: Where did you hit the bug?
+      options:
+        - Rust (tpt-stream-core / tpt-stream-columnar / tpt-csv)
+        - Python (tpt-streamforge)
+        - Node.js (tpt-streamforge-node)
+        - Browser (tpt-streamforge-browser)
+        - CLI (tptforge)
+        - C ABI (tpt-stream-ffi)
+        - Build / CI / packaging
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Crate/package version, or the git commit SHA if you are on `master`.
+      placeholder: "0.1.0 (crates.io), or commit 71e5b13"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: The actual behaviour, including the full error message or panic backtrace if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: |
+        Input data plus the command, pipeline file, or code that triggers it.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust/Python/Node version, and whether you built from source.
+      placeholder: "Windows 11, rustc 1.90, Python 3.13, the CLI built with cargo"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: This is not a security vulnerability (report those privately to the maintainers instead of in a public issue).
+          required: false

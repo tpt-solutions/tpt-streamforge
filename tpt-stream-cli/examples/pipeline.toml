@@ -1,0 +1,36 @@
+# Runnable tptforge example: a small sales report.
+#
+#   cargo run -p tpt-stream-cli -- run examples/pipeline.toml
+#   # or, with the binary installed:
+#   tptforge run examples/pipeline.toml
+#
+# Reads examples/input.csv and writes examples/report.csv (paths are relative
+# to the directory you run from).
+
+error_policy = "strict"
+
+[source.csv]
+path = "examples/input.csv"
+
+[[stages]]
+filter = "amount > 0"
+
+[[stages]]
+# `map` replaces the schema with exactly the listed columns, so keep `region`
+# if later stages need it.
+map = { region = "region", gross = "amount * 1.2" }
+
+[[stages]]
+expect = { rows_at_least = 1, no_nulls = ["region"] }
+
+[[stages]]
+aggregate = { group_by = ["region"], aggs = { gross = "sum", "*" = "count_all" } }
+
+[[stages]]
+sort = { columns = ["sum_gross"], descending = true }
+
+[[stages]]
+select = ["region", "sum_gross", "count_all"]
+
+[sink.csv]
+path = "examples/report.csv"

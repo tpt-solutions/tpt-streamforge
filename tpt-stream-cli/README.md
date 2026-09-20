@@ -1,6 +1,6 @@
 # tptforge — the tpt-streamforge CLI
 
-`tptforge` runs streaming ETL pipelines described in a single YAML file — no
+`tptforge` runs streaming ETL pipelines described in a single TOML file — no
 Rust, Python, or JavaScript required. Under the hood it drives the same
 `tpt-stream-core` engine as the language bindings.
 
@@ -8,31 +8,70 @@ Rust, Python, or JavaScript required. Under the hood it drives the same
 
 ```sh
 cargo install --path tpt-stream-cli
-# or use the Docker image (build locally; no registry image is published yet):
-docker build -t tptforge .
+# or use the published container image:
+docker pull ghcr.io/tpt-solutions/tptforge:latest
 ```
 
 ## Running a pipeline
 
-```yaml
-# pipeline.yaml
-source:
-  csv: { path: in.csv }
-error_policy: strict
-stages:
-  - filter: "amount > 0"
-  - map: { total: "amount * 2" }
-  - aggregate: { group_by: [region], aggs: { total: sum, "*": count_all } }
-  - sort: { columns: [sum_total], descending: true }
-  - expect: { rows_at_least: 1 }
-sink:
-  csv: out.csv
+```toml
+# pipeline.toml
+error_policy = "strict"
+
+[source]
+csv = { path = "in.csv" }
+
+[[stages]]
+filter = "amount > 0"
+
+[[stages]]
+# map replaces the schema with the columns you list, so keep `region` for the
+# group-by below.
+map = { region = "region", total = "amount * 2" }
+
+[[stages]]
+aggregate = { group_by = ["region"], aggs = { total = "sum", "*" = "count_all" } }
+
+[[stages]]
+sort = { columns = ["sum_total"], descending = true }
+
+[[stages]]
+expect = { rows_at_least = 1 }
+
+[sink]
+csv = "out.csv"
 ```
 
 ```sh
-tptforge run pipeline.yaml
+tptforge run pipeline.toml
 # 1000 rows in 16 batch(es), 2048 bytes out, in 41.2ms
 ```
+
+Every `key = value` above also accepts the table form, which is easier to
+read for long option lists:
+
+```toml
+[source.csv]
+path = "in.csv"
+chunk_rows = 65536
+
+[[stages]]
+[stages.aggregate]
+group_by = ["region"]
+
+[stages.aggregate.aggs]
+total = "sum"
+"*" = "count_all"
+
+[sink.csv]
+path = "out.csv"
+```
+
+Top-level keys are `source` (required), `stages` (array of tables),
+`error_policy`, and `sink`. A file named `*.yaml`/`*.yml` is rejected with a
+pointer to the TOML layout — pipeline files moved from YAML to TOML so the
+CLI no longer depends on an Apache-2.0-only TOML/YAML transitive crate
+(`ryu`).
 
 ### Sources
 
@@ -51,27 +90,28 @@ tptforge run pipeline.yaml
 
 ### Stages
 
-- `filter: "<expr>"` — keep rows where the expression is true
-- `map: { out_col: "<expr>", ... }` — replace the schema with computed columns
-- `select: [col, ...]` — project columns
-- `aggregate: { group_by: [...], aggs: { col: fn, "*": count_all } }` — fns:
-  `sum`, `avg`, `count`, `count_all`, `min`, `max`
-- `sort: { columns: [...], descending: false }`
-- `dedup: [col, ...]`
-- `join: { right: file.csv, left_keys: [...], right_keys: [...], type: inner|left|right }`
-- `expect: { rows_at_least: n, rows_at_most: n, no_nulls: [...], unique: [...] }`
+- `filter = "<expr>"` — keep rows where the expression is true
+- `map = { out_col = "<expr>" }` — replace the schema with computed columns
+- `select = [col, ...]` — project columns
+- `aggregate = { group_by = [...], aggs = { col = fn, "*" = "count_all" } }` —
+  fns: `sum`, `avg`, `count`, `count_all`, `min`, `max`
+- `sort = { columns = [...], descending = false }`
+- `dedup = [col, ...]`
+- `join = { right = "file.csv", left_keys = [...], right_keys = [...], type = "inner"|"left"|"right" }`
+- `expect = { rows_at_least = n, rows_at_most = n, no_nulls = [...], unique = [...] }`
 
 ### Sinks
 
-`csv`, `jsonl`, `json` (`pretty: true` optional), `columnar` (`use_zstd`),
+`csv`, `jsonl`, `json` (`pretty = true` optional), `columnar` (`use_zstd`),
 `sqlite` (`path`, `table`), `postgres` (`connection`, `table`), `s3`, `gcs`,
-`azure` — same options as the sources above.
+`azure` — same options as the sources above. Path-only sinks also accept the
+scalar shorthand (`csv = "out.csv"`).
 
 ### Error policies
 
-`error_policy` selects how malformed input rows are handled: `strict`
-(default: fail with a line number), `skip`, or `quarantine:<path>` (drop the
-row and capture it).
+`error_policy` selects how malformed input rows are handled: `"strict"`
+(default: fail with a line number), `"skip"`, or `"quarantine:<path>"` (drop
+the row and capture it).
 
 ## SQL
 

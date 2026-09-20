@@ -1,0 +1,39 @@
+# tpt-streamforge starter pipeline.
+#
+# Edit the source/sink paths, then run with:
+#   tptforge run pipeline.toml
+#
+# Full option reference: tpt-stream-cli/README.md
+
+# How malformed input rows are handled: strict | skip | quarantine:bad.csv
+error_policy = "strict"
+
+[source]
+# Local CSV (gzipped .csv.gz also works). Other sources: jsonl, json,
+# columnar, http, sqlite, postgres, s3, gcs, azure.
+csv = { path = "input.csv" }
+
+# Keep rows where the expression is true.
+[[stages]]
+filter = "amount > 0"
+
+# Compute new columns from row expressions. `map` keeps exactly the columns you
+# list, so repeat anything later stages still need (`region` here).
+[[stages]]
+map = { region = "region", total = "amount * 1.2" }
+
+# Data-quality gate: abort the run if the checks fail.
+[[stages]]
+expect = { rows_at_least = 1, no_nulls = ["region"] }
+
+# Aggregate per group (fns: sum avg count count_all min max).
+[[stages]]
+aggregate = { group_by = ["region"], aggs = { total = "sum", "*" = "count_all" } }
+
+# Sort descending by the summed total.
+[[stages]]
+sort = { columns = ["sum_total"], descending = true }
+
+[sink]
+# Other sinks: jsonl, json, columnar, sqlite, postgres, s3, gcs, azure.
+csv = { path = "output.csv" }

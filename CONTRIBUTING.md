@@ -11,13 +11,16 @@
 ## Workspace layout
 
 ```
+tpt-csv/               dependency-free streaming CSV reader/writer
 tpt-stream-core/       Rust engine (default-features build is async)
-tpt-stream-columnar/   optional parquet/zstd columnar acceleration
+tpt-stream-columnar/   native .tptcol columnar format, optional zstd
 tpt-stream-ffi/        C ABI over the core
 tpt-stream-py/         PyO3 Python package  (maturin)
 tpt-stream-wasm/       wasm-bindgen crate
   node/                tpt-streamforge-node (CJS wrapper + node:test suite)
   browser/             tpt-streamforge-browser (ESM wrapper + webpack harness)
+tpt-stream-cli/        tptforge CLI (TOML pipelines + SQL frontend)
+templates/             copy-paste pipeline starters
 ```
 
 ## Rust checks

@@ -2,7 +2,7 @@
 //! error policies (skip/quarantine), gzip sources, source-reuse errors, the
 //! Expect stage, preview, and CSV type-inference pins.
 #![cfg(feature = "async")]
-use tpt_stream_core::{source::ErrorPolicy, Check, Pipeline, Value};
+use tpt_stream_core::{source::ErrorPolicy, AggSpec, Check, Pipeline, Value};
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -253,6 +253,60 @@ fn preview_returns_first_rows_through_stages() {
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
     assert_eq!(batches[0].cell(0, "a"), Some(Value::Int32(2)));
+}
+
+#[test]
+fn preview_flushes_buffering_stages() {
+    // Sort/dedup/group-by/join buffer everything and only emit on finish(), so
+    // preview must drain those tails once the source is exhausted.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("in.csv");
+    write(&src, "k,v\nb,2\na,5\nb,1\nc,9\n");
+
+    let rt = runtime();
+
+    // sort
+    let batches = rt.block_on(async {
+        let mut p = Pipeline::new();
+        p.read_csv(src.to_string_lossy());
+        p.sort_by_desc(&["v"]);
+        p.preview(2).await.unwrap()
+    });
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 2, "preview(2) after sort must return 2 rows");
+    assert_eq!(batches[0].cell(0, "v"), Some(Value::Int32(9)));
+
+    // group-by + aggregate
+    let batches = rt.block_on(async {
+        let mut p = Pipeline::new();
+        p.read_csv(src.to_string_lossy());
+        p.aggregate(&["k"], &[AggSpec::sum("v")]);
+        p.preview(10).await.unwrap()
+    });
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 3, "one row per distinct key");
+
+    // dedup
+    let batches = rt.block_on(async {
+        let mut p = Pipeline::new();
+        p.read_csv(src.to_string_lossy());
+        p.dedup(&["k"]);
+        p.preview(10).await.unwrap()
+    });
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 3, "dedup by k leaves b, a, c");
+
+    // A streaming stage ahead of a buffering stage still truncates correctly.
+    let batches = rt.block_on(async {
+        let mut p = Pipeline::new();
+        p.read_csv(src.to_string_lossy());
+        p.filter_expr("v > 1");
+        p.sort_by(&["v"]);
+        p.preview(2).await.unwrap()
+    });
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 2);
+    assert_eq!(batches[0].cell(0, "v"), Some(Value::Int32(2)));
 }
 
 #[test]

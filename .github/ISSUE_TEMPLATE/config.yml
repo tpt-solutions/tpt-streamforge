@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or usage help
+    url: https://github.com/tpt-solutions/tpt-streamforge/blob/master/CONTRIBUTING.md
+    about: Setup, local test commands, and the CI gates are documented in CONTRIBUTING.md.
+  - name: Roadmap and planned work
+    url: https://github.com/tpt-solutions/tpt-streamforge/blob/master/todo.md
+    about: Phases, completed work, and known engine gaps.

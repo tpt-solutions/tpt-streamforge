@@ -1,0 +1,14 @@
+# Keep the Docker build context small: build outputs, vendored JS deps, and
+# local virtualenvs are all rebuilt inside the image.
+target/
+**/target/
+**/node_modules/
+tpt-stream-wasm/node/pkg/
+tpt-stream-wasm/browser/pkg/
+tpt-stream-wasm/browser/playground/dist/
+tpt-stream-wasm/browser/tests/dist/
+.venv/
+.git/
+.github/
+**/*.log
+dist/
