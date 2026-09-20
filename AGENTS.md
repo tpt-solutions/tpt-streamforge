@@ -37,6 +37,14 @@ cd browser     && npm ci && npm test
 
 On **Windows**: `node --test tests/*.test.js` (bare directory fails).
 
+### Browser playground
+
+```sh
+cd tpt-stream-wasm/browser
+npm run build:playground   # webpack bundle into playground/dist
+npm run serve:playground   # serve it locally
+```
+
 ## Feature flags
 
 - `tpt-stream-core` default features = `async` (tokio + rayon + async-trait).
@@ -60,9 +68,13 @@ tpt-stream-wasm/       wasm-bindgen (sync-only)
   node/                tpt-streamforge-node (CJS)
   browser/             tpt-streamforge-browser (ESM + webpack)
 tpt-stream-cli/        tptforge binary (clap + indicatif progress)
+  src/sql.rs           `tptforge sql` — sqlparser -> filter/aggregate/sort/limit stages
+tpt-stream-wasm/browser/playground/  in-browser pipeline builder (webpack, wasm-only)
 ```
 
 Default chunk size: **65,536 rows**. Spill-to-disk uses `.tptcol` under the system temp dir.
+
+Each crate carries its own `README.md` and `CHANGELOG.md` (crates.io `readme`/`categories`/`keywords` metadata); update the relevant crate's `CHANGELOG.md` alongside the root one when a change is scoped to that crate.
 
 ## Constraints
 
