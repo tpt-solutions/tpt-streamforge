@@ -101,6 +101,11 @@ pub struct AzureBlobStore {
     container: String,
     /// `https://{account}.blob.core.windows.net` or the Azurite equivalent.
     base_url: String,
+    /// True for path-style URLs (`http://host:port/{account}/...`, e.g.
+    /// Azurite). The Shared Key `CanonicalizedResource` must then repeat the
+    /// account name, since the URL path already carries it once and Azure's
+    /// signing rule unconditionally prepends it again.
+    path_style: bool,
     decoded_key: Vec<u8>,
     agent: crate::httpclient::Agent,
 }
@@ -129,7 +134,8 @@ impl AzureBlobStore {
         // (Azurite: http://127.0.0.1:10000/devstoreaccount1) carry it in the
         // path; anything else falls back to the credentials' account name.
         let path_account = url.path().trim_matches('/').split('/').next().unwrap_or("");
-        let account = if !path_account.is_empty() {
+        let path_style = !path_account.is_empty();
+        let account = if path_style {
             path_account.to_string()
         } else {
             url.host_str()
@@ -141,6 +147,7 @@ impl AzureBlobStore {
             account,
             container: container.trim_matches('/').to_string(),
             base_url,
+            path_style,
             decoded_key: credentials.decoded_key()?,
             agent: crate::httpclient::Agent::new(),
         })
@@ -173,8 +180,15 @@ impl AzureBlobStore {
         ms.sort();
         let canonical_headers: String = ms.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
 
-        // CanonicalizedResource: path plus sorted query params.
-        let mut resource = format!("/{}{}", self.account, canonical_resource);
+        // CanonicalizedResource: path plus sorted query params. Path-style
+        // URLs (the emulator) need the account name twice — once because the
+        // signing rule always prepends it, once because it's already the
+        // first path segment (`canonical_resource` includes it there).
+        let mut resource = if self.path_style {
+            format!("/{}/{}{}", self.account, self.account, canonical_resource)
+        } else {
+            format!("/{}{}", self.account, canonical_resource)
+        };
         let mut sorted: Vec<(&str, &str)> = query.to_vec();
         sorted.sort();
         for (k, v) in sorted {
@@ -186,9 +200,19 @@ impl AzureBlobStore {
         } else {
             String::new()
         };
+        // `httpclient::execute` adds `Content-Type: application/octet-stream`
+        // whenever the request has a body and no explicit content-type was
+        // set (which none of these calls do), so that must be reflected here
+        // too — Shared Key auth fails with 403 if the signed Content-Type
+        // doesn't match what's actually sent.
+        let content_type = if content_length > 0 {
+            "application/octet-stream"
+        } else {
+            ""
+        };
 
         let string_to_sign = format!(
-            "{method}\n\n\n{content_length_line}\n\n\n\n\n\n\n\n\n{canonical_headers}{resource}"
+            "{method}\n\n\n{content_length_line}\n\n{content_type}\n\n\n\n\n\n\n{canonical_headers}{resource}"
         );
 
         let mut mac =

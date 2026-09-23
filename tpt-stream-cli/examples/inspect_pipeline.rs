@@ -28,7 +28,8 @@ async fn main() -> Result<()> {
         }
     };
 
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let spec = parse_pipeline_toml(&text).with_context(|| format!("parsing {}", path.display()))?;
     let mut pipeline = build_pipeline(&spec)?;
 

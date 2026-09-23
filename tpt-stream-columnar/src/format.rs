@@ -107,7 +107,9 @@ fn read_u32(r: &mut &[u8], what: &str) -> Result<u32> {
 
 fn read_u64(r: &mut &[u8], what: &str) -> Result<u64> {
     let bytes = read_n(r, 8, what)?;
-    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+    Ok(u64::from_le_bytes(bytes.try_into().map_err(|_| {
+        FormatError::Malformed(format!("{what}: expected 8 bytes"))
+    })?))
 }
 
 fn read_n<'a>(r: &mut &'a [u8], n: usize, what: &str) -> Result<&'a [u8]> {
@@ -211,19 +213,35 @@ fn decode_buffer(
         let value = match data_type {
             DataType::Int32 => {
                 let slice = slice_chunk::<4>(data, i, rows, "int32")?;
-                Value::Int32(i32::from_le_bytes(slice.try_into().unwrap()))
+                Value::Int32(i32::from_le_bytes(
+                    slice
+                        .try_into()
+                        .map_err(|_| FormatError::Malformed("int32 slice length".into()))?,
+                ))
             }
             DataType::Int64 => {
                 let slice = slice_chunk::<8>(data, i, rows, "int64")?;
-                Value::Int64(i64::from_le_bytes(slice.try_into().unwrap()))
+                Value::Int64(i64::from_le_bytes(
+                    slice
+                        .try_into()
+                        .map_err(|_| FormatError::Malformed("int64 slice length".into()))?,
+                ))
             }
             DataType::Float32 => {
                 let slice = slice_chunk::<4>(data, i, rows, "float32")?;
-                Value::Float32(f32::from_le_bytes(slice.try_into().unwrap()))
+                Value::Float32(f32::from_le_bytes(
+                    slice
+                        .try_into()
+                        .map_err(|_| FormatError::Malformed("float32 slice length".into()))?,
+                ))
             }
             DataType::Float64 => {
                 let slice = slice_chunk::<8>(data, i, rows, "float64")?;
-                Value::Float64(f64::from_le_bytes(slice.try_into().unwrap()))
+                Value::Float64(f64::from_le_bytes(
+                    slice
+                        .try_into()
+                        .map_err(|_| FormatError::Malformed("float64 slice length".into()))?,
+                ))
             }
             DataType::Bool => {
                 if data.len() <= i {
@@ -233,11 +251,19 @@ fn decode_buffer(
             }
             DataType::Date => {
                 let slice = slice_chunk::<4>(data, i, rows, "date")?;
-                Value::Date(i32::from_le_bytes(slice.try_into().unwrap()))
+                Value::Date(i32::from_le_bytes(
+                    slice
+                        .try_into()
+                        .map_err(|_| FormatError::Malformed("date slice length".into()))?,
+                ))
             }
             DataType::Timestamp => {
                 let slice = slice_chunk::<8>(data, i, rows, "timestamp")?;
-                Value::Timestamp(i64::from_le_bytes(slice.try_into().unwrap()))
+                Value::Timestamp(i64::from_le_bytes(
+                    slice
+                        .try_into()
+                        .map_err(|_| FormatError::Malformed("timestamp slice length".into()))?,
+                ))
             }
             DataType::Utf8 => decode_utf8(data, i, rows)?,
         };
@@ -271,11 +297,15 @@ fn decode_utf8(data: &[u8], index: usize, rows: usize) -> Result<Value> {
             "utf8 offsets buffer too short".into(),
         ));
     }
-    let start = u64::from_le_bytes(data[index * 8..index * 8 + 8].try_into().unwrap()) as usize;
+    let start = u64::from_le_bytes(
+        data[index * 8..index * 8 + 8]
+            .try_into()
+            .map_err(|_| FormatError::Malformed("utf8 start-offset slice length".into()))?,
+    ) as usize;
     let end = u64::from_le_bytes(
         data[(index + 1) * 8..(index + 1) * 8 + 8]
             .try_into()
-            .unwrap(),
+            .map_err(|_| FormatError::Malformed("utf8 end-offset slice length".into()))?,
     ) as usize;
     let blob_start = (rows + 1) * 8;
     if end < start || blob_start + end > data.len() {
@@ -362,7 +392,9 @@ fn encode_nulls(column: &Column) -> Vec<u8> {
 
 pub fn decode_batch(bytes: &[u8]) -> Result<RecordBatch> {
     let mut r = bytes;
-    let magic: [u8; 8] = read_n(&mut r, 8, "magic")?.try_into().unwrap();
+    let magic: [u8; 8] = read_n(&mut r, 8, "magic")?
+        .try_into()
+        .map_err(|_| FormatError::Malformed("magic: expected 8 bytes".into()))?;
     if magic != MAGIC {
         return Err(FormatError::BadMagic(magic));
     }
@@ -507,8 +539,11 @@ impl<R: Read> ChunkedReader<R> {
 
         let mut counts = [0u8; 12];
         self.read_exact(&mut counts)?;
-        let num_columns = u32::from_le_bytes(counts[0..4].try_into().unwrap()) as usize;
-        let num_rows = u64::from_le_bytes(counts[4..12].try_into().unwrap()) as usize;
+        let num_columns = u32::from_le_bytes([counts[0], counts[1], counts[2], counts[3]]) as usize;
+        let num_rows = u64::from_le_bytes([
+            counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
+            counts[11],
+        ]) as usize;
 
         let mut columns = Vec::with_capacity(num_columns);
         for _ in 0..num_columns {
@@ -657,6 +692,76 @@ mod tests {
     fn bad_magic_rejected() {
         let err = decode_batch(b"NOTTPTCOL").unwrap_err();
         assert!(matches!(err, FormatError::BadMagic(_)));
+    }
+
+    // --- Corrupt / truncated input regression tests -------------------------
+
+    #[test]
+    fn empty_input_is_clean_error() {
+        let err = decode_batch(b"").unwrap_err();
+        assert!(
+            matches!(err, FormatError::Malformed(_)),
+            "expected Malformed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_after_magic_is_clean_error() {
+        // Only the magic bytes — no version/flags/counts.
+        let err = decode_batch(&MAGIC).unwrap_err();
+        assert!(
+            matches!(err, FormatError::Malformed(_)),
+            "expected Malformed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_mid_data_is_clean_error() {
+        let batch = sample_batch();
+        let mut bytes = encode_batch(&batch, false).unwrap();
+        // Lop off the last 20 bytes to simulate truncation mid-data.
+        let trunc_len = bytes.len().saturating_sub(20);
+        bytes.truncate(trunc_len);
+        let err = decode_batch(&bytes).unwrap_err();
+        assert!(
+            matches!(err, FormatError::Malformed(_) | FormatError::Io(_)),
+            "expected Malformed or Io, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bad_version_is_clean_error() {
+        let batch = sample_batch();
+        let mut bytes = encode_batch(&batch, false).unwrap();
+        // Version lives at bytes 8-9 (after the 8-byte magic); set it to 0xFF.
+        if bytes.len() > 9 {
+            bytes[8] = 0xFF;
+            bytes[9] = 0xFF;
+        }
+        let err = decode_batch(&bytes).unwrap_err();
+        assert!(
+            matches!(err, FormatError::BadVersion(_)),
+            "expected BadVersion, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn chunked_reader_truncated_is_clean_error() {
+        let mut data = Vec::new();
+        {
+            let mut writer = ChunkedWriter::new(&mut data, false);
+            writer.write_batch(&sample_batch()).unwrap();
+            writer.finish().unwrap();
+        }
+        // Truncate inside the first chunk's data.
+        let trunc_len = data.len() / 2;
+        let truncated = &data[..trunc_len];
+        let mut reader = ChunkedReader::new(truncated);
+        let result = reader.next_batch();
+        assert!(
+            result.is_err(),
+            "expected Err on truncated chunked input, got Ok"
+        );
     }
 
     #[test]

@@ -26,26 +26,37 @@ fn c_integration() {
         Ok(dir) => PathBuf::from(dir).join("debug"),
         Err(_) => workspace.join("target").join("debug"),
     };
-    let dll = target_dir.join("tpt_stream_ffi.dll");
+    let dll = target_dir.join(format!(
+        "{}tpt_stream_ffi{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    ));
     assert!(dll.exists(), "dll not found at {}", dll.display());
     let header_inc = manifest.join("include");
 
     // 3. Compile the C program, linking directly against the dll.
-    let runner = target_dir.join("tpt_c_integration.exe");
-    let compile = Command::new("gcc")
-        .current_dir(&manifest)
-        .args([
-            "-std=c11",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "tests/c_integration/main.c",
-            "-I",
-            header_inc.to_str().unwrap(),
-            "-o",
-            runner.to_str().unwrap(),
-            dll.to_str().unwrap(),
-        ])
+    let runner = target_dir.join(format!("tpt_c_integration{}", std::env::consts::EXE_SUFFIX));
+    let mut cmd = Command::new("gcc");
+    cmd.current_dir(&manifest).args([
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "tests/c_integration/main.c",
+        "-I",
+        header_inc.to_str().unwrap(),
+        "-o",
+        runner.to_str().unwrap(),
+        dll.to_str().unwrap(),
+    ]);
+    // On Linux/macOS the linker only records the shared lib's soname, so the
+    // runtime loader needs an rpath back to the build dir to find it again.
+    if cfg!(target_os = "linux") {
+        cmd.arg(format!("-Wl,-rpath,{}", target_dir.display()));
+    } else if cfg!(target_os = "macos") {
+        cmd.args(["-Wl,-rpath", &target_dir.display().to_string()]);
+    }
+    let compile = cmd
         .status()
         .expect("failed to run gcc (is a C compiler on PATH?)");
     assert!(compile.success(), "gcc compilation failed");

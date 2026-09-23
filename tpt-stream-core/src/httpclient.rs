@@ -126,16 +126,28 @@ impl<'a> RequestBuilder<'a> {
     }
 
     pub fn call(self) -> Result<Response, Error> {
-        execute(&self.agent.config, self.method, &self.url, &self.headers, &[])
+        execute(
+            &self.agent.config,
+            self.method,
+            &self.url,
+            &self.headers,
+            &[],
+        )
     }
 
     pub fn send_bytes(self, body: &[u8]) -> Result<Response, Error> {
-        execute(&self.agent.config, self.method, &self.url, &self.headers, body)
+        execute(
+            &self.agent.config,
+            self.method,
+            &self.url,
+            &self.headers,
+            body,
+        )
     }
 }
 
 pub enum Error {
-    Status(u16, Response),
+    Status(u16, Box<Response>),
     Transport(String),
 }
 
@@ -164,7 +176,7 @@ impl std::error::Error for Error {}
 /// `rustls-rustcrypto`. Real cloud endpoints always use `Tls`.
 enum Conn {
     Plain(TcpStream),
-    Tls(StreamOwned<ClientConnection, TcpStream>),
+    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
 }
 
 impl Read for Conn {
@@ -324,8 +336,8 @@ fn execute(
     }
 
     let addr = format!("{host}:{port}");
-    let tcp = TcpStream::connect(&addr)
-        .map_err(|e| Error::Transport(format!("connect {addr}: {e}")))?;
+    let tcp =
+        TcpStream::connect(&addr).map_err(|e| Error::Transport(format!("connect {addr}: {e}")))?;
     let _ = tcp.set_read_timeout(Some(IO_TIMEOUT));
     let _ = tcp.set_write_timeout(Some(IO_TIMEOUT));
 
@@ -334,7 +346,7 @@ fn execute(
             .map_err(|e| Error::Transport(format!("invalid hostname {host:?}: {e}")))?;
         let conn = ClientConnection::new(config.clone(), server_name)
             .map_err(|e| Error::Transport(format!("tls setup: {e}")))?;
-        Conn::Tls(StreamOwned::new(conn, tcp))
+        Conn::Tls(Box::new(StreamOwned::new(conn, tcp)))
     } else {
         Conn::Plain(tcp)
     };
@@ -394,7 +406,7 @@ fn execute(
         body: body_inner,
     };
     if !(200..300).contains(&status) {
-        return Err(Error::Status(status, response));
+        return Err(Error::Status(status, Box::new(response)));
     }
     Ok(response)
 }
@@ -406,15 +418,12 @@ fn parse_status_and_headers(
     reader.read_line(&mut status_line)?;
     let mut parts = status_line.trim().splitn(3, ' ');
     let _version = parts.next();
-    let status: u16 = parts
-        .next()
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("bad status line {status_line:?}"),
-            )
-        })?;
+    let status: u16 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad status line {status_line:?}"),
+        )
+    })?;
     let mut headers = Vec::new();
     loop {
         let mut line = String::new();

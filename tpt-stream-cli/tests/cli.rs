@@ -83,7 +83,6 @@ csv = "{out_csv}"
     assert_eq!(total_counted, 98); // (i*13) % 50 == 0 only for i in {0, 50}
 }
 
-
 #[tokio::test]
 async fn toml_pipeline_jsonl_source() {
     let dir = tempfile::tempdir().unwrap();
@@ -184,7 +183,8 @@ async fn retired_yaml_pipelines_are_rejected_with_a_hint() {
 /// The shipped starter template must always parse against the current schema.
 #[test]
 fn starter_template_parses() {
-    let text = std::fs::read_to_string(starter_template()).expect("starter template must be readable");
+    let text =
+        std::fs::read_to_string(starter_template()).expect("starter template must be readable");
     let spec = parse_pipeline_toml(&text).expect("starter template must parse");
     assert!(!spec.stages.is_empty());
     assert!(spec.sink.is_some());
@@ -231,7 +231,6 @@ async fn starter_template_runs_end_to_end() {
     assert!(lines[1].starts_with("emea,"), "{out}");
     assert!(lines[2].starts_with("amer,"), "{out}");
 }
-
 
 #[tokio::test]
 async fn schema_and_preview_commands() {

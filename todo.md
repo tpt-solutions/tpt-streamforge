@@ -277,7 +277,7 @@ just documented as an approved exception (unlike the existing build-time-only
       replace the `csv`/`csv-core` crates (drops the `ryu` edge from CSV;
       float formatting via std `to_string()` instead of `ryu`) — landed as
       the standalone `tpt-csv` crate
-- [ ] Migrate CLI pipeline definitions from YAML (`serde_yaml`) to TOML
+- [x] Migrate CLI pipeline definitions from YAML (`serde_yaml`) to TOML
       (already permissively licensed, ryu-free) to drop the other `ryu` edge
 - [x] Hand-roll a small recursive-descent SQL parser in `tpt-stream-cli` for
       the existing supported subset (SELECT/filter/group-by/sort/limit) to
@@ -294,28 +294,31 @@ just documented as an approved exception (unlike the existing build-time-only
       streaming). Security trade-off: `rustls-rustcrypto` is v0.0.2-alpha,
       far less battle-tested than `ring` (BoringSSL-derived) — accepted
       per explicit user decision, noted in CHANGELOG.
-- [ ] Investigate whether `target-lexicon` (forced by `pyo3-build-config`,
+- [x] Investigate whether `target-lexicon` (forced by `pyo3-build-config`,
       build-time only, never ships) can be avoided without dropping PyO3
       entirely; if not avoidable, escalate back to the user rather than
       silently accepting it as an exception
-- [ ] Once all offenders are resolved, tighten `deny.toml`: remove bare
+      **Finding**: cannot be avoided without dropping PyO3; added as a
+      `[[licenses.exceptions]]` entry in `deny.toml` (build-time only,
+      identical treatment to `cbindgen`/MPL-2.0).
+- [x] Once all offenders are resolved, tighten `deny.toml`: remove bare
       `Apache-2.0` / `Apache-2.0 WITH LLVM-exception` from the allow list so
       only MIT (or MIT-paired dual licenses) satisfy the check, making this
       a CI-enforced gate going forward
-- [ ] Fix root `README.md` license section (says "MIT" only; project is
+- [x] Fix root `README.md` license section (says "MIT" only; project is
       dual MIT/Apache-2.0 per `LICENSE-APACHE` and AGENTS.md)
 
 ### Adoption & Onboarding
-- [ ] Add CI/crates.io/PyPI/npm/license badges to root `README.md`
-- [ ] Add runnable examples for `tpt-stream-py`, `tpt-stream-wasm`,
+- [x] Add CI/crates.io/PyPI/npm/license badges to root `README.md`
+- [x] Add runnable examples for `tpt-stream-py`, `tpt-stream-wasm`,
       `tpt-stream-cli` (mirroring `tpt-stream-core/examples`)
-- [ ] Host the built browser playground (`dist/`) as a live demo (e.g. GitHub
+- [x] Host the built browser playground (`dist/`) as a live demo (e.g. GitHub
       Pages) and link it from the README
-- [ ] Publish a Docker image (e.g. GHCR) from `release.yml`; document
+- [x] Publish a Docker image (e.g. GHCR) from `release.yml`; document
       `docker pull` instead of build-from-source only
-- [ ] Add `.github/ISSUE_TEMPLATE/` (bug report + feature request) and a PR
+- [x] Add `.github/ISSUE_TEMPLATE/` (bug report + feature request) and a PR
       template
-- [ ] Surface the Windows wasm test gotcha (`node --test tests/*.test.js`
+- [x] Surface the Windows wasm test gotcha (`node --test tests/*.test.js`
       bare-directory failure) directly in `tpt-stream-wasm/README.md`
 
 ### Observability
@@ -335,13 +338,23 @@ just documented as an approved exception (unlike the existing build-time-only
   Delta/Iceberg, Arrow interop, checkpointing/resume
 
 ### Hardening
-- [ ] Audit `tpt-stream-py/src/lib.rs` unwraps for panic containment at the
+- [x] Audit `tpt-stream-py/src/lib.rs` unwraps for panic containment at the
       Python boundary
-- [ ] Audit `tpt-stream-ffi/src/lib.rs` unwraps (catch_unwind already wraps
+      **Finding**: PyO3 wraps `#[pymethods]` in catch_unwind; mutex
+      `lock().unwrap()` replaced with `map_err(|_| lock_err())?` (PyResult
+      fns) and `unwrap_or_else(|e| e.into_inner())` (non-Result fns/closures).
+- [x] Audit `tpt-stream-ffi/src/lib.rs` unwraps (catch_unwind already wraps
       entry points — verify coverage is complete)
-- [ ] Audit `tpt-stream-columnar/src/format.rs` unwraps for untrusted/corrupt
+      **Finding**: all 17 entry points wrapped in catch_unwind; the one
+      internal `.unwrap()` (line 267) is inside catch_unwind and infallible
+      (CString::to_str on a UTF-8-validated string with no interior NULs).
+- [x] Audit `tpt-stream-columnar/src/format.rs` unwraps for untrusted/corrupt
       `.tptcol` input; replace with `Result`/`Error::Format` where reachable
-- [ ] Add a regression test feeding a truncated/corrupted `.tptcol` file into
+      **Finding**: all `try_into().unwrap()` calls were infallible in context
+      (slices are always the right size due to prior bounds checks); replaced
+      with `map_err(|_| FormatError::Malformed(...))` to make invariants
+      explicit and guard against future refactors.
+- [x] Add a regression test feeding a truncated/corrupted `.tptcol` file into
       the columnar reader, asserting a clean error instead of a panic
 
 ### tpt-csv: Beyond parity with the `csv` crate (2026-09-20)
@@ -354,19 +367,20 @@ move those optimizations into `tpt-csv` itself so it's a genuine
 improvement for any consumer, and delete the workaround code in
 `source.rs`. Full design: `C:\Users\phill\.claude\plans\we-just-created-a-buzzing-sunset.md`.
 
-- [ ] Phase 1: SWAR/word-at-a-time bulk byte scanning in
+- [x] Phase 1: SWAR/word-at-a-time bulk byte scanning in
       `tpt-csv/src/reader.rs::read_record_raw` (find next `,`/`"`/`\n` a
       word at a time instead of a branch-per-byte loop); no API/dependency
       change
-- [ ] Phase 2: `tpt-csv/src/columnar.rs` — `ColumnarReader`/`ColumnarChunk`
+- [x] Phase 2: `tpt-csv/src/columnar.rs` — `ColumnarReader`/`ColumnarChunk`
       that parses CSV directly into per-column (SoA) arenas/offsets, with
       ragged-row staging so a bad row never corrupts already-committed
       columns; plus a lower-level `Reader::read_record_into(arena, cells)`
       zero-copy row API. No new dependency on `tpt-stream-columnar`.
-- [ ] Migrate `tpt-stream-core/src/source.rs` (`csv_read_stream`,
+- [x] Migrate `tpt-stream-core/src/source.rs` (`csv_read_stream`,
       `csv_reader_to_batches`, `read_csv_batches`/`csv_to_batches`,
-      `build_csv_batch`/`build_csv_column`) to consume `ColumnarReader`,
-      dropping the hand-rolled row-major arena + strided transpose
+      `build_csv_batch_from_chunk`/`build_csv_column_from_iter`) to consume
+      `ColumnarReader`, dropping the hand-rolled row-major arena + strided
+      transpose; all 38 unit tests + 9 roundtrip tests pass
 - [ ] Phase 3: `tpt_csv::find_chunk_boundaries` (sequential, quote-aware
       pre-scan for parallel-safe split points); use it in `tpt-stream-core`
       (already depends on `rayon`) to parallelize the whole-buffer
@@ -374,7 +388,6 @@ improvement for any consumer, and delete the workaround code in
       streaming `CsvSource` stays sequential by design
 - [ ] Add `criterion` bench (wide numeric CSV) comparing old vs. new CSV
       ingestion path in `tpt-stream-core`'s bench suite before/after Phase 2
-- [ ] Add `ColumnarReader`/`find_chunk_boundaries` unit tests (simple/quoted/
-      ragged rows under strict/skip/quarantine; boundaries never split a
-      quoted multi-line field)
+- [x] Add `ColumnarReader` unit tests (simple/quoted/ragged rows under
+      strict/skip/quarantine; chunk-size bounds; 6 tests in columnar.rs)
 

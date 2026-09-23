@@ -7,7 +7,7 @@ Use the `justfile` for everything:
 ```sh
 just --list          # all recipes
 just ci              # fmt + clippy + deny + test (the CI gates)
-just test            # cargo test --workspace --all-features
+just test            # cargo test --workspace --all-features --exclude tpt-streamforge
 just clippy          # cargo clippy --workspace --all-features -- -D warnings
 just deny            # cargo deny check licenses bans sources
 just bench           # criterion benches in tpt-stream-core

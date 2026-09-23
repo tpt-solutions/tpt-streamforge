@@ -69,7 +69,9 @@ fn one_key(value: toml::Value, what: &str) -> std::result::Result<(String, toml:
                 Ok((k, v))
             }
         }
-        other => Err(format!("{what} must be a table with one key, got {other:?}")),
+        other => Err(format!(
+            "{what} must be a table with one key, got {other:?}"
+        )),
     }
 }
 
@@ -709,7 +711,6 @@ fn is_yaml_path(path: &std::path::Path) -> bool {
         Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml")
     )
 }
-
 
 /// Inspect a file/URL: read the first `rows` output rows through the
 /// format's native reader.

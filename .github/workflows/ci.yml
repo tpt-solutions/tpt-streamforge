@@ -22,9 +22,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --workspace --all-features
+        run: cargo build --workspace --all-features --exclude tpt-streamforge
       - name: Test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --exclude tpt-streamforge
       - name: C ABI integration test
         if: runner.os != 'Windows'
         run: cargo test -p tpt-stream-ffi --test c_integration -- --ignored
@@ -45,7 +45,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           command: build
-          manifest-path: tpt-stream-py/Cargo.toml
+          working-directory: tpt-stream-py
           args: --release --out dist
       - name: Run pytest
         shell: bash
@@ -53,13 +53,13 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           python -m pip install --quiet pytest
-          python -m pip install --quiet dist/tpt_streamforge-*.whl
+          python -m pip install --quiet tpt-stream-py/dist/tpt_streamforge-*.whl
           python -m pytest tpt-stream-py/python/tests -q
       - name: Upload wheel
         uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.os }}
-          path: dist/*.whl
+          path: tpt-stream-py/dist/*.whl
 
   postgres-integration:
     name: PostgreSQL integration

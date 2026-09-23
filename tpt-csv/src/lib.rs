@@ -26,11 +26,13 @@
 //! assert_eq!(record.iter().collect::<Vec<_>>(), vec!["1", "2"]);
 //! ```
 
+pub mod columnar;
 mod error;
 mod reader;
 mod record;
 mod writer;
 
+pub use columnar::{ColumnarChunk, ColumnarReader, RaggedRowPolicy};
 pub use error::{Error, Result};
 pub use reader::{Position, Reader, ReaderBuilder};
 pub use record::StringRecord;

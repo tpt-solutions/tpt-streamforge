@@ -7,9 +7,10 @@ default:
 fmt:
     cargo fmt --all
 
-# Run every Rust test with all features
+# Run every Rust test with all features (tpt-stream-py is excluded: its
+# pyo3 "extension-module" feature only links correctly via maturin)
 test:
-    cargo test --workspace --all-features
+    cargo test --workspace --all-features --exclude tpt-streamforge
 
 # Lint with clippy (CI gate)
 clippy:

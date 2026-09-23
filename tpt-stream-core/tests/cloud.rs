@@ -460,10 +460,14 @@ fn s3_localstack_roundtrip() {
             .filter_expr("id >= 990")
             .write_csv(dir.path().join("back.csv").to_string_lossy());
         let stats = read.execute().await.unwrap();
-        assert_eq!(stats.rows, 10);
+        // `stats.rows` counts rows read from the source, before filtering
+        // (see `sqlite_pipeline_filter_stats`); the filtered count only
+        // shows up in what actually reaches the sink.
+        assert_eq!(stats.rows, 1000);
     });
 
     let back = std::fs::read_to_string(dir.path().join("back.csv")).unwrap();
+    assert_eq!(back.lines().count(), 11); // header + 10 filtered rows
     assert!(back.contains("990,name990"));
 }
 
@@ -502,9 +506,13 @@ fn azure_azurite_roundtrip() {
             .filter_expr("id >= 495")
             .write_csv(dir.path().join("back.csv").to_string_lossy());
         let stats = read.execute().await.unwrap();
-        assert_eq!(stats.rows, 5);
+        // `stats.rows` counts rows read from the source, before filtering
+        // (see `sqlite_pipeline_filter_stats`); the filtered count only
+        // shows up in what actually reaches the sink.
+        assert_eq!(stats.rows, 500);
     });
 
     let back = std::fs::read_to_string(dir.path().join("back.csv")).unwrap();
+    assert_eq!(back.lines().count(), 6); // header + 5 filtered rows
     assert!(back.contains("495,name495"));
 }

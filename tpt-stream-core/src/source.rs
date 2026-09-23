@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use std::io::{BufRead, Write};
 #[cfg(feature = "async")]
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tpt_csv::columnar::{ColumnarChunk, ColumnarReader, RaggedRowPolicy};
 
 #[cfg(feature = "async")]
 type BatchResult = std::result::Result<RecordBatch, Error>;
@@ -207,100 +208,51 @@ pub(crate) fn csv_read_stream(
     chunk_rows: usize,
     policy: &ErrorPolicy,
 ) {
-    let mut reader = tpt_csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(true)
-        .from_reader(reader);
-
-    let headers: Vec<String> = match reader.headers() {
-        Ok(h) => h.iter().map(|s| s.to_string()).collect(),
+    let mut columnar = match ColumnarReader::from_reader(reader) {
+        Ok(cr) => cr,
         Err(e) => {
             let _ = tx.send(Err(Error::Csv(e)));
             return;
         }
     };
+    let headers: Vec<String> = columnar.headers().iter().map(|s| s.to_string()).collect();
     if headers.is_empty() {
         let _ = tx.send(Err(Error::Schema("CSV file has no header row".into())));
         return;
     }
-    let num_columns = headers.len();
     let mut quarantine = QuarantineWriter::csv(&headers, policy);
-
     let mut schema: Option<Vec<DataType>> = None;
-    // Flat byte arena of raw cell contents plus (offset, len) per cell, in
-    // row-major order. Avoids one String allocation per cell.
-    let mut arena: Vec<u8> = Vec::with_capacity(chunk_rows * 32);
-    let mut cells: Vec<(usize, usize)> = Vec::with_capacity(chunk_rows * num_columns);
-    let mut record = tpt_csv::StringRecord::new();
-    // `position()` after a read points at the *end* of that record, which is
-    // the start line of the next one — so we sample it before each read to
-    // know where the current record begins.
-    let mut row_line = reader.position().line();
+    let mut chunk = ColumnarChunk::new(columnar.num_columns(), chunk_rows);
 
     loop {
-        match reader.read_record(&mut record) {
-            Ok(true) => {
-                if record.len() != num_columns {
-                    let detail = format!(
-                        "CSV row at line {row_line} has {} field(s), expected {num_columns}",
-                        record.len()
-                    );
-                    match policy {
-                        ErrorPolicy::Strict => {
-                            let _ = tx.send(Err(Error::Schema(detail)));
-                            return;
-                        }
-                        ErrorPolicy::Skip => continue,
-                        ErrorPolicy::Quarantine(_) => {
-                            match quarantine.write_record(record.iter()) {
-                                Ok(()) => continue,
-                                Err(e) => {
-                                    let _ = tx.send(Err(Error::Io(e)));
-                                    return;
-                                }
-                            }
-                        }
-                    }
+        let got = {
+            let mut quarantine_fn =
+                |fields: &[&str]| quarantine.write_record(fields.iter().copied());
+            let mut ragged = match policy {
+                ErrorPolicy::Strict => RaggedRowPolicy::Strict,
+                ErrorPolicy::Skip => RaggedRowPolicy::Skip,
+                ErrorPolicy::Quarantine(_) => RaggedRowPolicy::Quarantine(&mut quarantine_fn),
+            };
+            match columnar.read_chunk_into(chunk_rows, &mut ragged, &mut chunk) {
+                Ok(g) => g,
+                Err(e) => {
+                    let _ = tx.send(Err(Error::Csv(e)));
+                    return;
                 }
-                // Reuse arena memory across chunks when possible.
-                for field in &record {
-                    let start = arena.len();
-                    arena.extend_from_slice(field.as_bytes());
-                    cells.push((start, arena.len() - start));
-                }
-                if cells.len() >= chunk_rows * num_columns {
-                    let batch =
-                        match build_csv_batch(&headers, &mut schema, &arena, &cells, num_columns) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                let _ = tx.send(Err(e));
-                                return;
-                            }
-                        };
-                    if tx.send(Ok(batch)).is_err() {
-                        return;
-                    }
-                    arena.clear();
-                    cells.clear();
-                }
-                row_line = reader.position().line();
             }
-            Ok(false) => break,
-            Err(e) => {
-                let _ = tx.send(Err(Error::Csv(e)));
-                return;
-            }
+        };
+        if !got {
+            break;
         }
-    }
-
-    if !cells.is_empty() {
-        match build_csv_batch(&headers, &mut schema, &arena, &cells, num_columns) {
-            Ok(b) => {
-                let _ = tx.send(Ok(b));
-            }
+        let batch = match build_csv_batch_from_chunk(&headers, &mut schema, &chunk) {
+            Ok(b) => b,
             Err(e) => {
                 let _ = tx.send(Err(e));
+                return;
             }
+        };
+        if tx.send(Ok(batch)).is_err() {
+            return;
         }
     }
 }
@@ -324,7 +276,9 @@ impl QuarantineWriter {
         match std::fs::File::create(path) {
             Ok(file) => {
                 // Malformed rows may have any field count: flexible(true).
-                let mut writer = tpt_csv::WriterBuilder::new().flexible(true).from_writer(file);
+                let mut writer = tpt_csv::WriterBuilder::new()
+                    .flexible(true)
+                    .from_writer(file);
                 let _ = writer.write_record(headers);
                 QuarantineWriter::Csv(Box::new(writer))
             }
@@ -374,10 +328,6 @@ impl std::fmt::Debug for CsvSource {
 #[cfg(feature = "async")]
 pub(crate) fn read_csv_batches(path: &str, chunk_rows: usize) -> Result<Vec<RecordBatch>> {
     let reader = open_file_buffered(path).map_err(Error::Io)?;
-    let reader = tpt_csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(true)
-        .from_reader(reader);
     csv_reader_to_batches(reader, chunk_rows)
 }
 
@@ -385,60 +335,28 @@ pub(crate) fn read_csv_batches(path: &str, chunk_rows: usize) -> Result<Vec<Reco
 /// Exposed for language wrappers that do not have a filesystem (WASM) and for
 /// the FFI tests.
 pub fn csv_to_batches(text: &str, chunk_rows: usize) -> Result<Vec<RecordBatch>> {
-    let reader = tpt_csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(true)
-        .from_reader(text.as_bytes());
-    csv_reader_to_batches(reader, chunk_rows)
+    csv_reader_to_batches(text.as_bytes(), chunk_rows)
 }
 
 fn csv_reader_to_batches<R: std::io::Read>(
-    mut reader: tpt_csv::Reader<R>,
+    reader: R,
     chunk_rows: usize,
 ) -> Result<Vec<RecordBatch>> {
-    let headers: Vec<String> = match reader.headers() {
-        Ok(h) => h.iter().map(|s| s.to_string()).collect(),
-        Err(e) => return Err(Error::Csv(e)),
-    };
+    let mut columnar = ColumnarReader::from_reader(reader)?;
+    let headers: Vec<String> = columnar.headers().iter().map(|s| s.to_string()).collect();
     if headers.is_empty() {
         return Err(Error::Schema("CSV file has no header row".into()));
     }
-    let num_columns = headers.len();
     let mut schema: Option<Vec<DataType>> = None;
-    let mut arena: Vec<u8> = Vec::with_capacity(chunk_rows * 32);
-    let mut cells: Vec<(usize, usize)> = Vec::with_capacity(chunk_rows * num_columns);
-    let mut record = tpt_csv::StringRecord::new();
+    let mut chunk = ColumnarChunk::new(columnar.num_columns(), chunk_rows);
     let mut batches = Vec::new();
+    let mut policy = RaggedRowPolicy::Strict;
     loop {
-        match reader.read_record(&mut record) {
-            Ok(true) => {
-                if record.len() != num_columns {
-                    let line = reader.position().line();
-                    return Err(Error::Schema(format!(
-                        "CSV row at line {line} has {} field(s), expected {num_columns}",
-                        record.len()
-                    )));
-                }
-                for field in &record {
-                    let start = arena.len();
-                    arena.extend_from_slice(field.as_bytes());
-                    cells.push((start, arena.len() - start));
-                }
-                if cells.len() >= chunk_rows * num_columns {
-                    let batch =
-                        build_csv_batch(&headers, &mut schema, &arena, &cells, num_columns)?;
-                    batches.push(batch);
-                    arena.clear();
-                    cells.clear();
-                }
-            }
-            Ok(false) => break,
-            Err(e) => return Err(Error::Csv(e)),
+        let got = columnar.read_chunk_into(chunk_rows, &mut policy, &mut chunk)?;
+        if !got {
+            break;
         }
-    }
-    if !cells.is_empty() {
-        let batch = build_csv_batch(&headers, &mut schema, &arena, &cells, num_columns)?;
-        batches.push(batch);
+        batches.push(build_csv_batch_from_chunk(&headers, &mut schema, &chunk)?);
     }
     Ok(batches)
 }
@@ -484,44 +402,32 @@ pub(crate) fn parse_cell(cell: &str, data_type: DataType) -> std::result::Result
     }
 }
 
-#[inline]
-fn cell_str<'a>(arena: &'a [u8], cells: &[(usize, usize)], idx: usize) -> &'a str {
-    let (off, len) = cells[idx];
-    std::str::from_utf8(&arena[off..off + len]).unwrap_or_default()
-}
-
-pub(crate) fn infer_types(
-    arena: &[u8],
-    cells: &[(usize, usize)],
-    num_columns: usize,
-) -> Vec<DataType> {
-    let mut types = vec![DataType::Bool; num_columns];
-    for idx in 0..cells.len() {
-        let col = idx % num_columns;
-        let cell = cell_str(arena, cells, idx).trim();
-        if cell.is_empty() {
-            continue;
+pub(crate) fn infer_types_columnar(chunk: &ColumnarChunk) -> Vec<DataType> {
+    let mut types = vec![DataType::Bool; chunk.num_columns];
+    for (col, current) in types.iter_mut().enumerate() {
+        for cell in chunk.column_bytes(col) {
+            let cell = cell.trim();
+            if cell.is_empty() {
+                continue;
+            }
+            if fits(*current, cell) {
+                continue;
+            }
+            *current = escalate(*current, cell);
         }
-        let current = &mut types[col];
-        if fits(*current, cell) {
-            continue;
-        }
-        *current = escalate(*current, cell);
     }
     types
 }
 
-pub(crate) fn build_csv_batch(
+pub(crate) fn build_csv_batch_from_chunk(
     headers: &[String],
     schema: &mut Option<Vec<DataType>>,
-    arena: &[u8],
-    cells: &[(usize, usize)],
-    num_columns: usize,
+    chunk: &ColumnarChunk,
 ) -> Result<RecordBatch> {
     let resolved = match schema {
         Some(s) => s.clone(),
         None => {
-            let inferred = infer_types(arena, cells, num_columns);
+            let inferred = infer_types_columnar(chunk);
             *schema = Some(inferred.clone());
             inferred
         }
@@ -529,47 +435,40 @@ pub(crate) fn build_csv_batch(
     // Columns are independent: build them in parallel for throughput on hosts
     // with rayon (async feature), or sequentially on reduced targets (wasm).
     #[cfg(feature = "async")]
-    let columns = (0..num_columns)
+    let columns = (0..chunk.num_columns)
         .into_par_iter()
         .map(|i| {
-            build_csv_column(
+            build_csv_column_from_iter(
                 headers[i].clone(),
                 resolved[i],
-                arena,
-                cells,
-                num_columns,
-                i,
+                chunk.row_count,
+                chunk.column_bytes(i),
             )
         })
         .collect::<Result<Vec<_>>>()?;
     #[cfg(not(feature = "async"))]
-    let columns = (0..num_columns)
+    let columns = (0..chunk.num_columns)
         .map(|i| {
-            build_csv_column(
+            build_csv_column_from_iter(
                 headers[i].clone(),
                 resolved[i],
-                arena,
-                cells,
-                num_columns,
-                i,
+                chunk.row_count,
+                chunk.column_bytes(i),
             )
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(RecordBatch::new(columns))
 }
 
-fn build_csv_column(
+fn build_csv_column_from_iter<'a>(
     name: String,
     data_type: DataType,
-    arena: &[u8],
-    cells: &[(usize, usize)],
-    num_columns: usize,
-    col_index: usize,
+    row_count: usize,
+    fields: impl Iterator<Item = &'a str>,
 ) -> Result<Column> {
-    let rows = cells.len() / num_columns;
-    let mut col = Column::new(name, data_type, rows);
-    for row in 0..rows {
-        let cell = cell_str(arena, cells, row * num_columns + col_index).trim();
+    let mut col = Column::new(name, data_type, row_count);
+    for (col_index, cell) in fields.enumerate() {
+        let cell = cell.trim();
         if cell.is_empty() {
             col.push(Value::Null);
         } else {
@@ -1288,17 +1187,13 @@ impl_source!(ColumnarSource);
 mod tests {
     use super::*;
 
-    fn arena_from(raw: &[Vec<&str>], num_columns: usize) -> (Vec<u8>, Vec<(usize, usize)>) {
-        let mut arena = Vec::new();
-        let mut cells = Vec::new();
-        for row in raw {
-            for cell in row.iter().take(num_columns) {
-                let start = arena.len();
-                arena.extend_from_slice(cell.as_bytes());
-                cells.push((start, arena.len() - start));
-            }
-        }
-        (arena, cells)
+    fn chunk_from_csv(csv: &str) -> ColumnarChunk {
+        let mut cr = ColumnarReader::from_reader(csv.as_bytes()).unwrap();
+        let nc = cr.num_columns();
+        let mut chunk = ColumnarChunk::new(nc, 64);
+        let mut policy = RaggedRowPolicy::Strict;
+        cr.read_chunk_into(64, &mut policy, &mut chunk).unwrap();
+        chunk
     }
 
     #[test]
@@ -1317,13 +1212,8 @@ mod tests {
 
     #[test]
     fn infer_types_basic() {
-        let raw = vec![
-            vec!["1", "true", "x"],
-            vec!["2", "false", "y"],
-            vec!["3", "true", "z"],
-        ];
-        let (arena, cells) = arena_from(&raw, 3);
-        let types = infer_types(&arena, &cells, 3);
+        let chunk = chunk_from_csv("a,b,c\n1,true,x\n2,false,y\n3,true,z\n");
+        let types = infer_types_columnar(&chunk);
         assert_eq!(types[0], DataType::Int32);
         assert_eq!(types[1], DataType::Bool);
         assert_eq!(types[2], DataType::Utf8);
@@ -1331,18 +1221,16 @@ mod tests {
 
     #[test]
     fn infer_types_escalates() {
-        let raw = vec![vec!["1"], vec!["3000000000"], vec!["3.5"]];
-        let (arena, cells) = arena_from(&raw, 1);
-        let types = infer_types(&arena, &cells, 1);
+        let chunk = chunk_from_csv("n\n1\n3000000000\n3.5\n");
+        let types = infer_types_columnar(&chunk);
         assert_eq!(types[0], DataType::Float64);
     }
 
     #[test]
-    fn csv_batch_from_arena() {
-        let raw = vec![vec!["1", "true"], vec!["2", "false"]];
-        let (arena, cells) = arena_from(&raw, 2);
+    fn csv_batch_from_chunk() {
+        let chunk = chunk_from_csv("id,flag\n1,true\n2,false\n");
         let headers = vec!["id".to_string(), "flag".to_string()];
-        let batch = build_csv_batch(&headers, &mut None, &arena, &cells, 2).unwrap();
+        let batch = build_csv_batch_from_chunk(&headers, &mut None, &chunk).unwrap();
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.cell(1, "id"), Some(Value::Int32(2)));
         assert_eq!(batch.cell(0, "flag"), Some(Value::Bool(true)));

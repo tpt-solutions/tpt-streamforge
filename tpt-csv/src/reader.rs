@@ -108,6 +108,120 @@ impl<R: Read> Reader<R> {
         self.read_record_raw(record)
     }
 
+    /// Read one record into caller-owned buffers, reusing their allocations.
+    ///
+    /// Clears `arena` and `cells` before filling them. `arena` receives the
+    /// concatenated raw field bytes; `cells[i]` is `(start, len)` for field
+    /// `i` in `arena`. Returns `Ok(true)` if a record was read, `Ok(false)`
+    /// at EOF.
+    ///
+    /// This is the zero-copy building block for [`columnar::ColumnarReader`].
+    pub fn read_record_into(
+        &mut self,
+        arena: &mut Vec<u8>,
+        cells: &mut Vec<(usize, usize)>,
+    ) -> Result<bool> {
+        arena.clear();
+        cells.clear();
+
+        let mut field_start: usize = 0;
+        let mut in_quotes = false;
+        let mut maybe_closing_quote = false;
+        let mut record_started = false;
+        let start_line = self.line;
+
+        loop {
+            let buf = self.inner.fill_buf()?;
+            if buf.is_empty() {
+                if !cells.is_empty() || arena.len() > field_start || record_started {
+                    std::str::from_utf8(&arena[field_start..])
+                        .map_err(|_| Error::Utf8 { line: start_line })?;
+                    cells.push((field_start, arena.len() - field_start));
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            let mut consumed = 0;
+            let mut record_done = false;
+
+            while consumed < buf.len() && !record_done {
+                // SWAR fast path — unquoted region.
+                if !in_quotes && !maybe_closing_quote && consumed + 8 <= buf.len() {
+                    let word = u64::from_le_bytes(buf[consumed..consumed + 8].try_into().unwrap());
+                    if csv_special_mask(word) == 0 {
+                        arena.extend_from_slice(&buf[consumed..consumed + 8]);
+                        record_started = true;
+                        consumed += 8;
+                        continue;
+                    }
+                }
+
+                // SWAR fast path — quoted field.
+                if in_quotes && consumed + 8 <= buf.len() {
+                    let word = u64::from_le_bytes(buf[consumed..consumed + 8].try_into().unwrap());
+                    if word_has_byte(word, b'"') == 0 {
+                        arena.extend_from_slice(&buf[consumed..consumed + 8]);
+                        consumed += 8;
+                        continue;
+                    }
+                }
+
+                // Byte-by-byte fallback.
+                let b = buf[consumed];
+                consumed += 1;
+                record_started = true;
+
+                if maybe_closing_quote {
+                    maybe_closing_quote = false;
+                    if b == b'"' {
+                        arena.push(b'"');
+                        in_quotes = true;
+                        continue;
+                    }
+                    // Closing quote ended the field; fall through.
+                }
+
+                if in_quotes {
+                    if b == b'"' {
+                        in_quotes = false;
+                        maybe_closing_quote = true;
+                    } else {
+                        arena.push(b);
+                    }
+                    continue;
+                }
+
+                match b {
+                    b'"' if arena.len() == field_start => {
+                        in_quotes = true;
+                    }
+                    b',' => {
+                        std::str::from_utf8(&arena[field_start..])
+                            .map_err(|_| Error::Utf8 { line: start_line })?;
+                        cells.push((field_start, arena.len() - field_start));
+                        field_start = arena.len();
+                    }
+                    b'\n' => {
+                        self.line += 1;
+                        if arena.last() == Some(&b'\r') {
+                            arena.pop();
+                        }
+                        record_done = true;
+                    }
+                    _ => arena.push(b),
+                }
+            }
+
+            self.inner.consume(consumed);
+            if record_done {
+                std::str::from_utf8(&arena[field_start..])
+                    .map_err(|_| Error::Utf8 { line: start_line })?;
+                cells.push((field_start, arena.len() - field_start));
+                return Ok(true);
+            }
+        }
+    }
+
     fn read_record_raw(&mut self, record: &mut StringRecord) -> Result<bool> {
         record.clear();
         let mut field: Vec<u8> = Vec::with_capacity(32);
@@ -131,7 +245,37 @@ impl<R: Read> Reader<R> {
             }
             let mut consumed = 0;
             let mut record_done = false;
-            for &b in buf {
+
+            while consumed < buf.len() && !record_done {
+                // SWAR fast path — unquoted region: consume 8 bytes at once
+                // when none of them is a CSV-special byte.
+                if !in_quotes && !maybe_closing_quote && consumed + 8 <= buf.len() {
+                    // SAFETY: slice is exactly 8 bytes (bounds checked above).
+                    let word = u64::from_le_bytes(buf[consumed..consumed + 8].try_into().unwrap());
+                    if csv_special_mask(word) == 0 {
+                        field.extend_from_slice(&buf[consumed..consumed + 8]);
+                        record_started = true;
+                        consumed += 8;
+                        continue;
+                    }
+                }
+
+                // SWAR fast path — quoted field: only `"` is special.
+                // `in_quotes` implies `record_started` (the opening `"` was
+                // processed byte-by-byte, so `record_started` is already set).
+                if in_quotes && consumed + 8 <= buf.len() {
+                    // SAFETY: slice is exactly 8 bytes (bounds checked above).
+                    let word = u64::from_le_bytes(buf[consumed..consumed + 8].try_into().unwrap());
+                    if word_has_byte(word, b'"') == 0 {
+                        field.extend_from_slice(&buf[consumed..consumed + 8]);
+                        consumed += 8;
+                        continue;
+                    }
+                }
+
+                // Byte-by-byte fallback (handles all special bytes and partial
+                // words at the end of the buffer).
+                let b = buf[consumed];
                 consumed += 1;
                 record_started = true;
 
@@ -142,8 +286,7 @@ impl<R: Read> Reader<R> {
                         in_quotes = true;
                         continue;
                     }
-                    // else: the quote really closed the field; fall through
-                    // and process `b` under the "not in quotes" rules below.
+                    // Quote closed the field; fall through to normal handling.
                 }
 
                 if in_quotes {
@@ -170,11 +313,11 @@ impl<R: Read> Reader<R> {
                             field.pop();
                         }
                         record_done = true;
-                        break;
                     }
                     _ => field.push(b),
                 }
             }
+
             self.inner.consume(consumed);
             if record_done {
                 push_field(record, field, start_line)?;
@@ -188,6 +331,29 @@ fn push_field(record: &mut StringRecord, bytes: Vec<u8>, line: u64) -> Result<()
     let text = std::str::from_utf8(&bytes).map_err(|_| Error::Utf8 { line })?;
     record.push_field(text);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SWAR (SIMD Within A Register) helpers
+// ---------------------------------------------------------------------------
+
+/// Returns a mask with 0x80 set in each byte position where `w` has byte `x`.
+///
+/// Classic Mycroft/Knuth zeroing trick: XOR to make target bytes zero, then
+/// check for zero bytes via the carry-chain `(v - 0x01..01) & ~v & 0x80..80`.
+#[inline(always)]
+fn word_has_byte(w: u64, x: u8) -> u64 {
+    let v = w ^ (u64::from(x).wrapping_mul(0x0101_0101_0101_0101));
+    v.wrapping_sub(0x0101_0101_0101_0101) & !v & 0x8080_8080_8080_8080
+}
+
+/// Non-zero if `w` contains any CSV-special byte: `','`, `'"'`, `'\n'`, `'\r'`.
+#[inline(always)]
+fn csv_special_mask(w: u64) -> u64 {
+    word_has_byte(w, b',')
+        | word_has_byte(w, b'"')
+        | word_has_byte(w, b'\n')
+        | word_has_byte(w, b'\r')
 }
 
 #[cfg(test)]
@@ -219,7 +385,10 @@ mod tests {
 
     #[test]
     fn no_trailing_newline() {
-        assert_eq!(read_all("a,b"), vec![vec!["a".to_string(), "b".to_string()]]);
+        assert_eq!(
+            read_all("a,b"),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
     }
 
     #[test]
@@ -308,18 +477,12 @@ mod tests {
 
     #[test]
     fn empty_quoted_field_at_eof_is_a_record() {
-        assert_eq!(
-            read_all("\"\""),
-            vec![vec!["".to_string()]]
-        );
+        assert_eq!(read_all("\"\""), vec![vec!["".to_string()]]);
     }
 
     #[test]
     fn trailing_empty_field_without_newline() {
-        assert_eq!(
-            read_all("a,"),
-            vec![vec!["a".to_string(), "".to_string()]]
-        );
+        assert_eq!(read_all("a,"), vec![vec!["a".to_string(), "".to_string()]]);
     }
 
     #[test]

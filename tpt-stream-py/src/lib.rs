@@ -33,6 +33,10 @@ fn to_pyerr(err: tpt_stream_core::Error) -> PyErr {
     TptError::new_err(err.to_string())
 }
 
+fn lock_err() -> PyErr {
+    TptError::new_err("internal error: pipeline lock poisoned")
+}
+
 /// Wrap any Python-side error as a `TptError`.
 fn py_err(err: PyErr) -> PyErr {
     TptError::new_err(err.to_string())
@@ -148,17 +152,17 @@ impl PyPipeline {
     /// `to_arrow`, and `to_pandas`). Consumes the pipeline like `execute`.
     fn collect_batches(&self, py: Python<'_>) -> PyResult<Vec<tpt_stream_core::RecordBatch>> {
         {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock().map_err(|_| lock_err())?;
             check_pending(&inner)?;
         }
         let callback = self
             .progress
             .lock()
-            .unwrap()
+            .map_err(|_| lock_err())?
             .as_ref()
             .map(|c| c.clone_ref(py));
         if let Some(callback) = callback {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().map_err(|_| lock_err())?;
             inner.on_progress(Arc::new(move |event| {
                 Python::attach(|py| {
                     let dict = event_to_dict(py, event);
@@ -173,7 +177,7 @@ impl PyPipeline {
             .build()
             .map_err(|e| TptError::new_err(format!("failed to build runtime: {e}")))?;
         py.detach(|| {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             runtime.block_on(inner.collect())
         })
         .map_err(to_pyerr)
@@ -186,7 +190,7 @@ impl PyPipeline {
             let expr = v.extract::<String>()?;
             pairs.push((col, expr));
         }
-        let mut inner = self.inner.lock().expect("pipeline mutex poisoned");
+        let mut inner = self.inner.lock().map_err(|_| lock_err())?;
         let pair_refs: Vec<(&str, &str)> = pairs
             .iter()
             .map(|(a, b)| (a.as_str(), b.as_str()))
@@ -212,7 +216,7 @@ impl PyPipeline {
     fn on_progress(slf: Bound<'_, Self>, callback: Py<PyAny>) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            *cell.progress.lock().unwrap() = Some(callback);
+            *cell.progress.lock().map_err(|_| lock_err())? = Some(callback);
         }
         Ok(slf.unbind())
     }
@@ -221,7 +225,7 @@ impl PyPipeline {
     /// dicts with `name`, `rows_in`, `rows_out`, `batches`, `elapsed_ms`,
     /// `rows_per_sec` (empty before the first run).
     fn stage_stats(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().map_err(|_| lock_err())?;
         let stats: Vec<Bound<'_, PyDict>> = inner
             .stage_stats()
             .iter()
@@ -244,7 +248,7 @@ impl PyPipeline {
     fn read_csv(slf: Bound<'_, Self>, path: &str, chunk_size: Option<usize>) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             if let Some(n) = chunk_size {
                 inner.with_chunk_size(n);
             }
@@ -259,7 +263,7 @@ impl PyPipeline {
     fn filter(slf: Bound<'_, Self>, expr: &str) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             inner.filter_expr(expr);
             check_pending(&inner)?;
         }
@@ -300,7 +304,7 @@ impl PyPipeline {
         let cols: Vec<String> = columns.extract()?;
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
             if descending {
                 inner.sort_by_desc(&col_refs);
@@ -316,7 +320,7 @@ impl PyPipeline {
         let cols: Vec<String> = columns.extract()?;
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
             inner.dedup(&col_refs);
         }
@@ -327,7 +331,7 @@ impl PyPipeline {
     fn write_csv(slf: Bound<'_, Self>, path: &str) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             inner.write_csv(path);
             check_pending(&inner)?;
         }
@@ -340,7 +344,7 @@ impl PyPipeline {
         // Scope the guard: the run below re-locks the (non-reentrant) mutex
         // after the GIL is released.
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().map_err(|_| lock_err())?;
             check_pending(&inner)?;
             // Attach the Python progress callback (if registered) as a
             // telemetry hook; the GIL is held here, so re-entering Python
@@ -348,7 +352,7 @@ impl PyPipeline {
             let callback = self
                 .progress
                 .lock()
-                .unwrap()
+                .map_err(|_| lock_err())?
                 .as_ref()
                 .map(|c| c.clone_ref(py));
             if let Some(callback) = callback {
@@ -372,7 +376,7 @@ impl PyPipeline {
         // pipeline streams. The progress hook re-acquires it per event.
         let stats = py
             .detach(|| {
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 runtime.block_on(inner.execute())
             })
             .map_err(to_pyerr)?;
@@ -389,7 +393,7 @@ impl PyPipeline {
         let cols: Vec<String> = columns.extract()?;
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
             inner.select(&col_refs);
         }
@@ -420,7 +424,7 @@ impl PyPipeline {
         let right: Vec<String> = right_keys.extract()?;
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             let l: Vec<&str> = left.iter().map(|s| s.as_str()).collect();
             let r: Vec<&str> = right.iter().map(|s| s.as_str()).collect();
             inner
@@ -439,7 +443,7 @@ impl PyPipeline {
     ) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             if let Some(n) = chunk_size {
                 inner.with_chunk_size(n);
             }
@@ -457,7 +461,7 @@ impl PyPipeline {
     ) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             if let Some(n) = chunk_size {
                 inner.with_chunk_size(n);
             }
@@ -470,7 +474,7 @@ impl PyPipeline {
     fn write_jsonl(slf: Bound<'_, Self>, path: &str) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().write_jsonl(path);
+            cell.inner.lock().map_err(|_| lock_err())?.write_jsonl(path);
         }
         Ok(slf.unbind())
     }
@@ -480,7 +484,10 @@ impl PyPipeline {
     fn write_json(slf: Bound<'_, Self>, path: &str, pretty: bool) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().write_json(path, pretty);
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .write_json(path, pretty);
         }
         Ok(slf.unbind())
     }
@@ -489,7 +496,10 @@ impl PyPipeline {
     fn read_columnar(slf: Bound<'_, Self>, path: &str) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().read_columnar(path);
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .read_columnar(path);
         }
         Ok(slf.unbind())
     }
@@ -499,7 +509,10 @@ impl PyPipeline {
     fn write_columnar(slf: Bound<'_, Self>, path: &str, use_zstd: bool) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().write_columnar(path, use_zstd);
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .write_columnar(path, use_zstd);
         }
         Ok(slf.unbind())
     }
@@ -508,7 +521,10 @@ impl PyPipeline {
     fn read_sqlite(slf: Bound<'_, Self>, path: &str, query: &str) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().read_sqlite(path, query);
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .read_sqlite(path, query);
         }
         Ok(slf.unbind())
     }
@@ -517,7 +533,10 @@ impl PyPipeline {
     fn write_sqlite(slf: Bound<'_, Self>, path: &str, table: &str) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().write_sqlite(path, table);
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .write_sqlite(path, table);
         }
         Ok(slf.unbind())
     }
@@ -526,7 +545,10 @@ impl PyPipeline {
     fn read_postgres(slf: Bound<'_, Self>, conn_string: &str, query: &str) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().read_postgres(conn_string, query);
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .read_postgres(conn_string, query);
         }
         Ok(slf.unbind())
     }
@@ -537,7 +559,7 @@ impl PyPipeline {
             let cell = slf.borrow_mut();
             cell.inner
                 .lock()
-                .unwrap()
+                .map_err(|_| lock_err())?
                 .write_postgres(conn_string, table);
         }
         Ok(slf.unbind())
@@ -550,7 +572,7 @@ impl PyPipeline {
         let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             inner.read_s3(bucket_url, key, &creds).map_err(to_pyerr)?;
         }
         Ok(slf.unbind())
@@ -561,7 +583,7 @@ impl PyPipeline {
         let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             inner.write_s3(bucket_url, key, &creds).map_err(to_pyerr)?;
         }
         Ok(slf.unbind())
@@ -574,7 +596,7 @@ impl PyPipeline {
         let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             inner.read_gcs(bucket, key, &creds).map_err(to_pyerr)?;
         }
         Ok(slf.unbind())
@@ -585,7 +607,7 @@ impl PyPipeline {
         let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
         {
             let cell = slf.borrow_mut();
-            let mut inner = cell.inner.lock().unwrap();
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
             inner.write_gcs(bucket, key, &creds).map_err(to_pyerr)?;
         }
         Ok(slf.unbind())
@@ -604,7 +626,10 @@ impl PyPipeline {
             .map_err(to_pyerr)?;
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().read_azure_blob(store, key);
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .read_azure_blob(store, key);
         }
         Ok(slf.unbind())
     }
@@ -621,7 +646,10 @@ impl PyPipeline {
             .map_err(to_pyerr)?;
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().write_azure_blob(store, key);
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .write_azure_blob(store, key);
         }
         Ok(slf.unbind())
     }
@@ -631,7 +659,7 @@ impl PyPipeline {
     fn read_http(slf: Bound<'_, Self>, url: &str) -> PyResult<Py<Self>> {
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().read_http(url);
+            cell.inner.lock().map_err(|_| lock_err())?.read_http(url);
         }
         Ok(slf.unbind())
     }
@@ -642,7 +670,7 @@ impl PyPipeline {
         {
             let cell = slf.borrow_mut();
             let parsed = parse_error_policy(policy)?;
-            cell.inner.lock().unwrap().on_error(parsed);
+            cell.inner.lock().map_err(|_| lock_err())?.on_error(parsed);
         }
         Ok(slf.unbind())
     }
@@ -675,14 +703,20 @@ impl PyPipeline {
         }
         {
             let cell = slf.borrow_mut();
-            cell.inner.lock().unwrap().expect_checks(checks);
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .expect_checks(checks);
         }
         Ok(slf.unbind())
     }
 
     /// Human-readable stage plan, e.g. `"source -> filter -> sink"`.
     fn explain(&self) -> String {
-        self.inner.lock().unwrap().explain()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .explain()
     }
 
     /// Run the stages over the first `n` output rows and return them as a
@@ -695,7 +729,7 @@ impl PyPipeline {
             .map_err(|e| TptError::new_err(format!("failed to build runtime: {e}")))?;
         let batches = py
             .detach(|| {
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 runtime.block_on(inner.preview(n))
             })
             .map_err(to_pyerr)?;
@@ -747,13 +781,19 @@ impl PyPipeline {
 
     /// Number of pipeline stages attached so far.
     fn num_stages(&self) -> usize {
-        self.inner.lock().unwrap().num_stages()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .num_stages()
     }
 
     fn __repr__(&self) -> String {
         format!(
             "Pipeline(stages={})",
-            self.inner.lock().unwrap().num_stages()
+            self.inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .num_stages()
         )
     }
 }
@@ -791,7 +831,7 @@ impl PyGroupBy {
         }
         {
             let pipeline = self.pipeline.bind(py).borrow();
-            let mut inner = pipeline.inner.lock().unwrap();
+            let mut inner = pipeline.inner.lock().map_err(|_| lock_err())?;
             let key_refs: Vec<&str> = self.columns.iter().map(|s| s.as_str()).collect();
             inner.aggregate(&key_refs, &specs);
             check_pending(&inner)?;
