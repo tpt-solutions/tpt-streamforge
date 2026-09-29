@@ -46,18 +46,27 @@ fn client_config() -> Arc<ClientConfig> {
         .clone()
 }
 
-/// A minimal HTTP client. Cheap to clone (just an `Arc<ClientConfig>`);
-/// each request opens its own TLS connection.
+/// A minimal HTTP client. Cheap to clone (just an `Arc<ClientConfig>` plus the
+/// retry policy); each request opens its own TLS connection.
 #[derive(Clone)]
 pub struct Agent {
     config: Arc<ClientConfig>,
+    retry: RetryPolicy,
 }
 
 impl Agent {
     pub fn new() -> Self {
         Agent {
             config: client_config(),
+            retry: RetryPolicy::default(),
         }
+    }
+
+    /// Retry transient failures according to `policy`. Off by default.
+    #[must_use]
+    pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry = policy;
+        self
     }
 
     pub fn get(&self, url: &str) -> RequestBuilder<'_> {
@@ -80,6 +89,89 @@ impl Agent {
 impl Default for Agent {
     fn default() -> Self {
         Agent::new()
+    }
+}
+
+/// How many times, and how patiently, to retry a failed request.
+///
+/// Retries only ever fire for *transient* failures — transport errors and
+/// retryable statuses (408, 429, 5xx). A 4xx that isn't 408/429 is the server
+/// telling us the request itself is wrong, so it is surfaced immediately
+/// rather than retried into the same rejection.
+///
+/// `attempts` counts total tries, so `attempts: 1` disables retrying and is
+/// the default, keeping existing behavior unchanged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RetryPolicy {
+    /// Total attempts including the first, so `1` means "no retry".
+    pub attempts: u32,
+    /// Delay before the first retry; doubles each subsequent retry.
+    pub base_delay: Duration,
+    /// Upper bound on any single backoff delay.
+    pub max_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        // No retries unless a caller opts in.
+        RetryPolicy {
+            attempts: 1,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(10),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// A policy that never retries. Equivalent to the default.
+    pub fn none() -> Self {
+        RetryPolicy::default()
+    }
+
+    /// `attempts` total tries, starting from `base_delay` and doubling up to
+    /// `max_delay`.
+    pub fn new(attempts: u32, base_delay: Duration, max_delay: Duration) -> Self {
+        RetryPolicy {
+            attempts: attempts.max(1),
+            base_delay,
+            max_delay,
+        }
+    }
+
+    /// Exponential backoff for `attempt` (1-based), with jitter and a cap.
+    ///
+    /// Jitter is full-width over `[delay/2, delay]`, so a fleet of clients
+    /// retrying after the same outage does not resynchronize into a thundering
+    /// herd. Deterministic (seeded from the attempt number) to keep this
+    /// testable without a RNG dependency.
+    pub fn backoff(&self, attempt: u32) -> Duration {
+        if self.base_delay.is_zero() {
+            return Duration::ZERO;
+        }
+        let shift = attempt.saturating_sub(1).min(16);
+        let scaled = self
+            .base_delay
+            .saturating_mul(1u32 << shift)
+            .min(self.max_delay);
+        // Cheap deterministic jitter in [50%, 100%] of `scaled`.
+        let jitter_nanos = (scaled.as_nanos() as u64)
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(attempt as u64)
+            % 1_000_000_007;
+        let half = scaled / 2;
+        half + Duration::from_nanos(jitter_nanos % (half.as_nanos() as u64).max(1))
+    }
+}
+
+/// Whether a failed attempt is worth retrying.
+///
+/// `status` is `None` for transport-level failures (connection reset, TLS
+/// error, timeout), which are the most common transient fault.
+pub fn is_retryable(status: Option<u16>) -> bool {
+    match status {
+        // Transport failure: no response at all.
+        None => true,
+        Some(code) => code == 408 || code == 429 || (500..600).contains(&code),
     }
 }
 
@@ -126,8 +218,9 @@ impl<'a> RequestBuilder<'a> {
     }
 
     pub fn call(self) -> Result<Response, Error> {
-        execute(
+        execute_with_retry(
             &self.agent.config,
+            self.agent.retry,
             self.method,
             &self.url,
             &self.headers,
@@ -136,13 +229,61 @@ impl<'a> RequestBuilder<'a> {
     }
 
     pub fn send_bytes(self, body: &[u8]) -> Result<Response, Error> {
-        execute(
+        execute_with_retry(
             &self.agent.config,
+            self.agent.retry,
             self.method,
             &self.url,
             &self.headers,
             body,
         )
+    }
+}
+
+/// Run one request, retrying transient failures per `policy`.
+///
+/// `body` is a byte slice that `execute` copies into the socket on each
+/// attempt, so a retry re-sends the identical payload; that keeps retries safe
+/// for the idempotent requests the cloud modules issue (GET, PUT of a part,
+/// DELETE of an upload).
+fn execute_with_retry(
+    config: &Arc<ClientConfig>,
+    policy: RetryPolicy,
+    method: &str,
+    url: &str,
+    extra_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<Response, Error> {
+    let attempts = policy.attempts.max(1);
+    let mut attempt = 1;
+    loop {
+        match execute(config, method, url, extra_headers, body) {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                let status = match &err {
+                    Error::Status(code, _) => Some(*code),
+                    Error::Transport(_) => None,
+                };
+                if attempt >= attempts || !is_retryable(status) {
+                    return Err(err);
+                }
+                let delay = policy.backoff(attempt);
+                crate::trace_event!(
+                    "tpt_stream_core::httpclient",
+                    crate::telemetry::Level::INFO,
+                    method,
+                    url,
+                    status = status.unwrap_or(0),
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    "retrying transient request failure"
+                );
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+                attempt += 1;
+            }
+        }
     }
 }
 
@@ -436,4 +577,74 @@ fn parse_status_and_headers(
         }
     }
     Ok((status, headers))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_policy_does_not_retry() {
+        assert_eq!(RetryPolicy::default().attempts, 1);
+        assert_eq!(RetryPolicy::none(), RetryPolicy::default());
+    }
+
+    #[test]
+    fn transport_and_server_errors_are_retryable() {
+        // No response at all: the most common transient fault.
+        assert!(is_retryable(None));
+        assert!(is_retryable(Some(408)));
+        assert!(is_retryable(Some(429)));
+        assert!(is_retryable(Some(500)));
+        assert!(is_retryable(Some(503)));
+    }
+
+    #[test]
+    fn client_errors_are_not_retryable() {
+        // Retrying a malformed or unauthorized request just wastes time and
+        // hammers the endpoint; it can never succeed.
+        for code in [400, 401, 403, 404, 409, 413, 422] {
+            assert!(!is_retryable(Some(code)), "{code} must not retry");
+        }
+    }
+
+    #[test]
+    fn backoff_grows_and_is_capped() {
+        let policy = RetryPolicy::new(10, Duration::from_millis(100), Duration::from_millis(800));
+        let mut last = Duration::ZERO;
+        for attempt in 1..=10 {
+            let delay = policy.backoff(attempt);
+            assert!(
+                delay <= policy.max_delay,
+                "attempt {attempt} exceeded max_delay: {delay:?}"
+            );
+            // Jitter keeps it in [50%, 100%] of the scaled delay, so growth is
+            // monotonic per-attempt but never exactly doubling.
+            if attempt <= 3 {
+                assert!(delay >= last, "backoff shrank at attempt {attempt}");
+                last = delay;
+            }
+        }
+    }
+
+    #[test]
+    fn backoff_of_zero_is_immediate() {
+        let policy = RetryPolicy::new(5, Duration::ZERO, Duration::from_secs(1));
+        assert_eq!(policy.backoff(1), Duration::ZERO);
+        assert_eq!(policy.backoff(4), Duration::ZERO);
+    }
+
+    #[test]
+    fn backoff_never_exceeds_cap_even_with_large_shift() {
+        let policy = RetryPolicy::new(64, Duration::from_secs(1), Duration::from_secs(5));
+        for attempt in [1, 2, 30, 31, 63, 64] {
+            assert!(policy.backoff(attempt) <= Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn attempts_of_zero_is_clamped_to_one() {
+        let policy = RetryPolicy::new(0, Duration::ZERO, Duration::ZERO);
+        assert_eq!(policy.attempts, 1, "0 attempts must still try once");
+    }
 }

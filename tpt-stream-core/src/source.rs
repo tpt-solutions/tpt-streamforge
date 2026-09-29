@@ -327,15 +327,123 @@ impl std::fmt::Debug for CsvSource {
 /// Read an entire CSV file into batches (used to load join build relations).
 #[cfg(feature = "async")]
 pub(crate) fn read_csv_batches(path: &str, chunk_rows: usize) -> Result<Vec<RecordBatch>> {
+    // Whole-buffer inputs are split at record boundaries and parsed in
+    // parallel; the bounded-memory streaming `CsvSource` stays sequential.
+    if let Some(buf) = slurp_parallelizable(path) {
+        return csv_bytes_to_batches(&buf, chunk_rows);
+    }
     let reader = open_file_buffered(path).map_err(Error::Io)?;
     csv_reader_to_batches(reader, chunk_rows)
 }
 
+/// Read `path` fully into memory when it is worth parsing in parallel:
+/// uncompressed, at least [`PARALLEL_CSV_MIN_BYTES`], and not gzip-compressed
+/// (a compressed file must stay on the streaming decompression path).
+///
+/// `None` means "use the sequential streaming path" — either because the file
+/// is small, because it is compressed, or because it cannot be stat'ed. The
+/// caller then reports any I/O error from the normal open path, so a missing
+/// file still surfaces as `Error::Io` with its real cause.
+#[cfg(feature = "async")]
+fn slurp_parallelizable(path: &str) -> Option<Vec<u8>> {
+    if path.ends_with(".gz") {
+        return None;
+    }
+    let len = std::fs::metadata(path).ok()?.len();
+    if len < PARALLEL_CSV_MIN_BYTES as u64 {
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
+/// Whole-buffer CSV inputs at least this large are parsed across the rayon
+/// pool. Below it, the thread hand-off costs more than the scan it parallelizes.
+#[cfg(feature = "async")]
+pub const PARALLEL_CSV_MIN_BYTES: usize = 1 << 20;
+
 /// Parse in-memory CSV text into `RecordBatch`es of `chunk_rows` rows each.
 /// Exposed for language wrappers that do not have a filesystem (WASM) and for
 /// the FFI tests.
+///
+/// Inputs of at least [`PARALLEL_CSV_MIN_BYTES`] are split at record boundaries
+/// and parsed concurrently, which yields exactly the same batches as the
+/// sequential path.
 pub fn csv_to_batches(text: &str, chunk_rows: usize) -> Result<Vec<RecordBatch>> {
+    #[cfg(feature = "async")]
+    if text.len() >= PARALLEL_CSV_MIN_BYTES {
+        return csv_bytes_to_batches(text.as_bytes(), chunk_rows);
+    }
     csv_reader_to_batches(text.as_bytes(), chunk_rows)
+}
+
+/// Parse in-memory CSV text on the calling thread, never splitting the input.
+///
+/// This is what [`csv_to_batches`] does for inputs below
+/// [`PARALLEL_CSV_MIN_BYTES`], exposed so benchmarks can compare the two paths
+/// on identical input.
+pub fn csv_to_batches_sequential(text: &str, chunk_rows: usize) -> Result<Vec<RecordBatch>> {
+    csv_reader_to_batches(text.as_bytes(), chunk_rows)
+}
+
+/// Parse a whole in-memory CSV buffer, splitting it at record boundaries and
+/// parsing the slices across the rayon pool.
+///
+/// The header is parsed once, sequentially. Each slice is then handed to
+/// [`ColumnarReader::from_slice`] with the header's column count, so slices
+/// need no header of their own. Batches are built in slice order, which keeps
+/// type inference identical to the sequential path (the first non-empty batch
+/// fixes the schema) and makes an error in a later slice surface only after
+/// earlier slices have been processed — the same first-failure behavior a
+/// sequential parse has.
+#[cfg(feature = "async")]
+fn csv_bytes_to_batches(buf: &[u8], chunk_rows: usize) -> Result<Vec<RecordBatch>> {
+    let header_reader = ColumnarReader::from_reader(buf)?;
+    let headers: Vec<String> = header_reader.headers().iter().map(str::to_string).collect();
+    if headers.is_empty() {
+        return Err(Error::Schema("CSV file has no header row".into()));
+    }
+    // The header occupies record 1, so data record `n` is document record
+    // `n + 1`.
+    let Some(data_start) = tpt_csv::first_record_end(buf) else {
+        return Ok(Vec::new());
+    };
+    let boundaries = tpt_csv::find_chunk_boundaries(&buf[data_start..], chunk_rows);
+    if boundaries.is_empty() {
+        // A single slice: nothing to gain from the parallel path.
+        return csv_reader_to_batches(buf, chunk_rows);
+    }
+    let num_columns = header_reader.num_columns();
+
+    // Each entry is (slice bytes, document record number of its first record).
+    let mut ranges: Vec<(&[u8], u64)> = Vec::with_capacity(boundaries.len() + 1);
+    let mut start = data_start;
+    let mut next_record = 2u64;
+    for boundary in &boundaries {
+        let end = data_start + boundary.offset;
+        ranges.push((&buf[start..end], next_record));
+        start = end;
+        next_record = boundary.record + 1;
+    }
+    ranges.push((&buf[start..], next_record));
+
+    let chunks: Vec<Result<ColumnarChunk>> = ranges
+        .par_iter()
+        .map(|(slice, first_record)| {
+            let mut reader = ColumnarReader::from_slice(*slice, num_columns, *first_record);
+            let mut policy = RaggedRowPolicy::Strict;
+            let mut chunk = ColumnarChunk::new(num_columns, chunk_rows);
+            reader.read_chunk_into(chunk_rows, &mut policy, &mut chunk)?;
+            Ok(chunk)
+        })
+        .collect();
+
+    // Build batches in order so schema inference sees the first rows first.
+    let mut schema: Option<Vec<DataType>> = None;
+    let mut batches = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        batches.push(build_csv_batch_from_chunk(&headers, &mut schema, &chunk?)?);
+    }
+    Ok(batches)
 }
 
 fn csv_reader_to_batches<R: std::io::Read>(
@@ -1301,5 +1409,212 @@ mod in_memory_csv_tests {
         let batches = csv_to_batches(&text, 2).unwrap();
         assert_eq!(batches.len(), 3); // 2 + 2 + 1
         assert_eq!(batches_to_csv(&batches), text);
+    }
+
+    /// Append filler rows of `columns` fields until `text` is at least
+    /// [`PARALLEL_CSV_MIN_BYTES`], so the parallel path is really exercised
+    /// regardless of how wide the caller's own rows turn out to be.
+    #[cfg(feature = "async")]
+    fn pad_to_parallel_size(mut text: String, columns: usize) -> String {
+        let mut i = 0usize;
+        while text.len() < PARALLEL_CSV_MIN_BYTES {
+            let row = (0..columns)
+                .map(|c| {
+                    if c == 1 {
+                        format!("\"filler {i}\"")
+                    } else {
+                        i.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            text.push_str(&row);
+            text.push('\n');
+            i += 1;
+        }
+        text
+    }
+
+    /// Build a CSV whose rows mix the quoting styles that make naive newline
+    /// splitting wrong: embedded newlines, escaped quotes, and commas inside
+    /// quoted fields. Rows are normalized on write (CRLF becomes LF), so
+    /// compare against the sequential result rather than the raw input.
+    #[cfg(feature = "async")]
+    fn messy_csv(rows: usize) -> String {
+        let mut text = String::from("id,label,value\n");
+        for i in 0..rows {
+            match i % 3 {
+                0 => text.push_str(&format!("{i},plain,{}\n", i * 7)),
+                1 => text.push_str(&format!("{i},\"has, comma\",{}\n", i * 7)),
+                _ => text.push_str(&format!("{i},\"two\nlines\",{}\n", i * 7)),
+            }
+        }
+        text
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn parallel_csv_matches_sequential() {
+        // Quoted newlines would corrupt the data if the boundary scan ignored
+        // quote state, so this doubles as a check that slicing is lossless.
+        let text = pad_to_parallel_size(messy_csv(3), 3);
+        assert!(text.len() >= PARALLEL_CSV_MIN_BYTES);
+
+        let parallel = csv_to_batches(&text, 4096).unwrap();
+        let sequential = csv_to_batches_sequential(&text, 4096).unwrap();
+
+        assert!(parallel.len() > 1, "expected multiple slices");
+        assert_eq!(parallel.len(), sequential.len());
+        assert_eq!(batches_to_csv(&parallel), batches_to_csv(&sequential));
+        assert_eq!(
+            parallel.iter().map(|b| b.num_rows()).sum::<usize>(),
+            sequential.iter().map(|b| b.num_rows()).sum::<usize>()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn parallel_csv_slicing_is_record_aligned_at_every_chunk_size() {
+        let text = pad_to_parallel_size(messy_csv(3), 3);
+        let expected = batches_to_csv(&csv_to_batches_sequential(&text, 4096).unwrap());
+        // Sizes that do and do not divide the row count evenly.
+        for chunk_rows in [7usize, 999, 4096, 100_000] {
+            let batches = csv_to_batches(&text, chunk_rows).unwrap();
+            assert_eq!(
+                batches_to_csv(&batches),
+                expected,
+                "chunk_rows={chunk_rows}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn parallel_csv_ragged_row_reports_whole_document_position() {
+        // A short row in a later slice must report its position in the whole
+        // document, not relative to its own slice.
+        let mut text = pad_to_parallel_size(String::from("id,label\n"), 2);
+        let rows = text.lines().count() - 1;
+        text.push_str("short\n");
+        // The header is record 1 and the `rows` data rows are records 2..=rows+1,
+        // so the short row is document record rows+2 — the position a
+        // sequential parse would report.
+        let expected_line = rows as u64 + 2;
+
+        let err = csv_to_batches(&text, 1000).unwrap_err();
+        match err {
+            Error::Csv(tpt_csv::Error::Ragged {
+                line,
+                expected,
+                got,
+            }) => {
+                assert_eq!((line, expected, got), (expected_line, 2, 1));
+            }
+            other => panic!("expected a ragged-row error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn parallel_csv_last_slice_ending_at_buffer_end_adds_no_empty_batch() {
+        // The final slice ends precisely at the buffer end; no empty trailing
+        // batch may appear.
+        let text = pad_to_parallel_size(String::from("id,label\n"), 2);
+        let rows = text.lines().count() - 1;
+        assert!(rows > 1000, "fixture must span several slices");
+        let chunk_rows = (rows / 1000) * 1000;
+        let batches = csv_to_batches(&text, chunk_rows).unwrap();
+        // The remainder becomes a final partial batch, never an empty one.
+        assert!(batches.iter().all(|b| b.num_rows() > 0));
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), rows);
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn parallel_csv_without_trailing_newline() {
+        // The final record has no line ending; it must be included in the last
+        // slice rather than dropped.
+        let mut text = pad_to_parallel_size(String::from("id,label\n"), 2);
+        let rows = text.lines().count() - 1;
+        text.push_str("99999,last");
+
+        let batches = csv_to_batches(&text, 1000).unwrap();
+        assert_eq!(
+            batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            rows + 1
+        );
+        let out = batches_to_csv(&batches);
+        assert!(out.ends_with("99999,last\n"), "last row missing");
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn parallel_csv_preserves_embedded_newlines_in_values() {
+        // The strongest check that boundaries respect quotes: every quoted
+        // value containing a newline must survive intact and in order.
+        let mut text = pad_to_parallel_size(String::from("id,label\n"), 2);
+        for i in 0..2000 {
+            text.push_str(&format!("{i},\"line one\nline two {i}\"\n"));
+        }
+        let out = batches_to_csv(&csv_to_batches(&text, 256).unwrap());
+        for i in 0..2000 {
+            assert!(
+                out.contains(&format!("\"line one\nline two {i}\"")),
+                "value {i} was corrupted across a slice boundary"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn parallel_csv_single_huge_record_yields_no_batches() {
+        // Above the threshold, but the only record is the header: the boundary
+        // scan must not invent data rows.
+        let text = format!("\"{}\",b\n", "x".repeat(PARALLEL_CSV_MIN_BYTES));
+        assert!(csv_to_batches(&text, 1024).unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn parallel_csv_ragged_row_in_first_slice_is_reported() {
+        let mut text = String::from("id,label\n1\n");
+        text.push_str(&pad_to_parallel_size(String::new(), 2));
+        let err = csv_to_batches(&text, 1000).unwrap_err();
+        match err {
+            Error::Csv(tpt_csv::Error::Ragged {
+                line,
+                expected,
+                got,
+            }) => {
+                assert_eq!((line, expected, got), (2, 2, 1));
+            }
+            other => panic!("expected a ragged-row error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn parallel_csv_type_inference_matches_sequential() {
+        // A late non-numeric value must still widen the schema exactly as the
+        // sequential path does, proving batches are built in slice order.
+        let mut text = pad_to_parallel_size(String::from("id,value\n"), 2);
+        let rows = text.lines().count() - 1;
+        text.push_str("99999,not-a-number\n");
+
+        let parallel = csv_to_batches(&text, 4096).unwrap();
+        let sequential = csv_to_batches_sequential(&text, 4096).unwrap();
+        assert_eq!(batches_to_csv(&parallel), batches_to_csv(&sequential));
+        assert_eq!(parallel.len(), sequential.len());
+        // Both paths widen `value` to text.
+        for batches in [&parallel, &sequential] {
+            assert_eq!(
+                batches[0].column("value").unwrap().data_type(),
+                DataType::Utf8
+            );
+        }
+        assert_eq!(
+            rows + 1,
+            parallel.iter().map(|b| b.num_rows()).sum::<usize>()
+        );
     }
 }

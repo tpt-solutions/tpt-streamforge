@@ -60,6 +60,92 @@ pub enum TelemetryEvent {
 /// Progress hook: a shared closure receiving each [`TelemetryEvent`].
 pub type ProgressHook = Arc<dyn Fn(&TelemetryEvent) + Send + Sync>;
 
+/// Verbosity of an instrumented event. A thin alias so call sites don't need
+/// `cfg` blocks of their own: with the `tracing` feature on these are
+/// `tracing`'s levels, and with it off they are inert placeholders that the
+/// macro discards.
+#[cfg(feature = "tracing")]
+pub use tracing::Level;
+#[cfg(not(feature = "tracing"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    DEBUG,
+    INFO,
+}
+
+#[macro_use]
+#[path = "telemetry/macros.rs"]
+mod trace_macros;
+
+/// Mirror a [`TelemetryEvent`] into `tracing`.
+///
+/// Called from the pipeline runner next to the existing `ProgressHook`
+/// dispatch, so a subscriber sees the same events whether it hooks the
+/// callback or installs a `tracing` subscriber — they are independent and can
+/// be used together.
+pub(crate) fn emit_tracing(event: &TelemetryEvent) {
+    match event {
+        TelemetryEvent::SourceBatch {
+            rows,
+            total_rows,
+            batches,
+        } => {
+            // With the `tracing` feature off the field values are never read,
+            // so the macro discards them; the leading-underscore locals keep
+            // the match arms identical either way.
+            let (_rows, _total, _batches) = (*rows, *total_rows, *batches);
+            crate::trace_event!(
+                "tpt_stream_core::pipeline",
+                crate::telemetry::Level::DEBUG,
+                rows,
+                total_rows,
+                batches,
+                "source batch"
+            );
+        }
+        TelemetryEvent::StageBatch {
+            stage,
+            rows_in,
+            rows_out,
+        } => {
+            let (_stage, _in, _out) = (stage, rows_in, rows_out);
+            crate::trace_event!(
+                "tpt_stream_core::pipeline",
+                crate::telemetry::Level::DEBUG,
+                stage,
+                rows_in,
+                rows_out,
+                "stage batch"
+            );
+        }
+        TelemetryEvent::SinkBatch { rows, total_rows } => {
+            let (_rows, _total) = (rows, total_rows);
+            crate::trace_event!(
+                "tpt_stream_core::pipeline",
+                crate::telemetry::Level::DEBUG,
+                rows,
+                total_rows,
+                "sink batch"
+            );
+        }
+        TelemetryEvent::Done {
+            rows,
+            batches,
+            elapsed,
+        } => {
+            let (_rows, _batches, _elapsed) = (rows, batches, elapsed);
+            crate::trace_event!(
+                "tpt_stream_core::pipeline",
+                crate::telemetry::Level::INFO,
+                rows,
+                batches,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "pipeline finished"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

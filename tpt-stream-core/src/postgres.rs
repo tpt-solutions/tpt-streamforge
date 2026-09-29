@@ -208,6 +208,57 @@ fn coerce_to(value: Value, data_type: DataType) -> Value {
 // Sink
 // ---------------------------------------------------------------------------
 
+/// The sink's default retry policy: one immediate reconnect, with no delay.
+///
+/// This preserves the sink's long-standing behavior exactly (a single
+/// transparent retry after a dropped connection) while making it configurable
+/// via [`PostgresSink::with_retry`]. A zero base delay keeps the happy path
+/// latency unchanged; callers facing real flakiness raise `attempts` and
+/// `base_delay`.
+pub const DEFAULT_PG_RETRY: crate::httpclient::RetryPolicy = crate::httpclient::RetryPolicy {
+    attempts: 2,
+    base_delay: std::time::Duration::ZERO,
+    max_delay: std::time::Duration::ZERO,
+};
+
+/// Whether a failed `COPY` is worth retrying.
+///
+/// Classified from the server's SQLSTATE, which is the stable, documented way
+/// to tell a transient condition from a permanent one. The classes that mean
+/// "the server is busy or the connection broke" retry; everything else (syntax
+/// error, unknown column, type mismatch, constraint violation, and every other
+/// permanent fault) is surfaced immediately, because retrying it can only
+/// produce the same failure.
+///
+/// `08` is `connection_exception`, `40` is `transaction_rollback`, `53` is
+/// `insufficient_resources`, `57` is `operator_intervention` (includes
+/// `query_canceled` and `admin_shutdown`), and `58` is `system_error` (includes
+/// the `08` family some servers report through it). `40001` is
+/// `serialization_failure` and `40P01` is `deadlock_detected` — both transient
+/// under concurrency.
+fn is_transient_postgres_error(detail: &str) -> bool {
+    // A connection-level failure never got a SQLSTATE at all; the driver
+    // reports it as a closed/broken connection.
+    if detail.contains("connection") || detail.contains("Connection") {
+        return true;
+    }
+    // `db error: <CODE>: <message>` is how tokio-postgres renders a DbError.
+    let Some(code) = detail
+        .split("db error: ")
+        .nth(1)
+        .and_then(|rest| rest.split(':').next())
+        .map(str::trim)
+    else {
+        return false;
+    };
+    matches!(code, "40001" | "40P01")
+        || code.starts_with("08")
+        || code.starts_with("40")
+        || code.starts_with("53")
+        || code.starts_with("57")
+        || code.starts_with("58")
+}
+
 pub struct PostgresSink {
     conn_string: String,
     table: String,
@@ -215,6 +266,7 @@ pub struct PostgresSink {
     client: Option<tokio_postgres::Client>,
     driver: Option<tokio::task::JoinHandle<()>>,
     rows_written: u64,
+    retry: crate::httpclient::RetryPolicy,
 }
 
 impl PostgresSink {
@@ -226,6 +278,7 @@ impl PostgresSink {
             client: None,
             driver: None,
             rows_written: 0,
+            retry: DEFAULT_PG_RETRY,
         }
     }
 
@@ -234,8 +287,32 @@ impl PostgresSink {
         self
     }
 
+    /// Retry a failed `COPY` after reconnecting, per `policy`.
+    ///
+    /// Defaults to [`DEFAULT_PG_RETRY`] — one immediate reconnect, which is
+    /// the long-standing behavior: pipelines routinely outlive an idle TCP hop
+    /// (NAT gateway, connection pooler in front of Postgres), and one
+    /// transparent retry covers it without adding latency to the happy path.
+    /// Raise `attempts` and give `base_delay` a value for real network
+    /// flakiness; pass [`crate::httpclient::RetryPolicy::none`] to disable
+    /// retrying entirely.
+    #[must_use]
+    pub fn with_retry(mut self, policy: crate::httpclient::RetryPolicy) -> Self {
+        self.retry = policy;
+        self
+    }
+
     pub fn rows_written(&self) -> u64 {
         self.rows_written
+    }
+
+    /// Drop the current client and stop its driver task, so the next
+    /// [`connect`](Self::connect) starts from a clean socket.
+    fn reset_connection(&mut self) {
+        self.client = None;
+        if let Some(driver) = self.driver.take() {
+            driver.abort();
+        }
     }
 
     async fn connect(&mut self, batch: &RecordBatch) -> Result<()> {
@@ -293,28 +370,58 @@ impl crate::sink::Sink for PostgresSink {
         if batch.num_rows() == 0 {
             return Ok(());
         }
-        if self.client.is_none() {
-            self.connect(batch).await?;
-        }
-        // One transparent retry after a dropped connection: long-running
-        // pipelines outlive idle TCP hops (NATs, pgbouncer) surprisingly often.
-        match self.copy_batch(batch).await {
-            Ok(()) => {}
-            Err(e) => {
-                self.client = None;
-                if let Some(driver) = self.driver.take() {
-                    driver.abort();
-                }
+        let policy = self.retry;
+        let attempts = policy.attempts.max(1);
+        let mut attempt = 1;
+        let mut first_failure: Option<String> = None;
+
+        loop {
+            // (Re)connect on the first attempt, and after any failure that
+            // leaves us without a usable client.
+            if self.client.is_none() {
                 self.connect(batch).await?;
-                self.copy_batch(batch).await.map_err(|retry| {
-                    Error::Database(format!(
-                        "postgres copy (after reconnect): {retry}; first failure: {e}"
-                    ))
-                })?;
+            }
+
+            match self.copy_batch(batch).await {
+                Ok(()) => {
+                    self.rows_written += batch.num_rows() as u64;
+                    return Ok(());
+                }
+                Err(e) => {
+                    // A permanent failure (bad column, type mismatch,
+                    // constraint violation) will fail identically on every
+                    // attempt, so retrying just burns time and connections.
+                    let detail = e.to_string();
+                    let retryable = is_transient_postgres_error(&detail);
+                    if attempt >= attempts || !retryable {
+                        return Err(match first_failure {
+                            Some(first) => Error::Database(format!(
+                                "postgres copy: {detail}; first failure: {first}"
+                            )),
+                            None => e,
+                        });
+                    }
+                    first_failure.get_or_insert(detail);
+
+                    let delay = policy.backoff(attempt);
+                    crate::trace_event!(
+                        "tpt_stream_core::postgres",
+                        crate::telemetry::Level::INFO,
+                        table = self.table.as_str(),
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        "retrying postgres COPY after failure"
+                    );
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    // Force a fresh connection: a COPY that failed because the
+                    // socket died cannot succeed on the same dead client.
+                    self.reset_connection();
+                    attempt += 1;
+                }
             }
         }
-        self.rows_written += batch.num_rows() as u64;
-        Ok(())
     }
 
     async fn finish(&mut self) -> Result<()> {
@@ -589,6 +696,115 @@ impl crate::source::Source for PostgresSource {
                 self.reader.done = true;
                 Ok(None)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_policy_is_one_immediate_reconnect() {
+        // Matches the sink's historical behavior: exactly one retry, no delay.
+        assert_eq!(DEFAULT_PG_RETRY.attempts, 2);
+        assert_eq!(DEFAULT_PG_RETRY.base_delay, std::time::Duration::ZERO);
+        assert_eq!(DEFAULT_PG_RETRY.backoff(1), std::time::Duration::ZERO);
+        assert_eq!(DEFAULT_PG_RETRY.backoff(5), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn new_sink_uses_the_default_policy() {
+        let sink = PostgresSink::new("postgres://localhost/x", "t");
+        assert_eq!(sink.retry, DEFAULT_PG_RETRY);
+    }
+
+    #[test]
+    fn with_retry_overrides_the_policy() {
+        let policy = crate::httpclient::RetryPolicy::new(
+            5,
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_secs(2),
+        );
+        let sink = PostgresSink::new("postgres://localhost/x", "t").with_retry(policy);
+        assert_eq!(sink.retry.attempts, 5);
+        assert_eq!(sink.retry.base_delay, std::time::Duration::from_millis(200));
+    }
+
+    #[test]
+    fn with_retry_none_disables_retrying() {
+        let sink = PostgresSink::new("postgres://localhost/x", "t")
+            .with_retry(crate::httpclient::RetryPolicy::none());
+        assert_eq!(sink.retry.attempts, 1, "a single attempt means no retry");
+    }
+
+    #[test]
+    fn connection_failures_are_transient() {
+        for detail in [
+            "db error: connection closed",
+            "connection reset by peer",
+            "Connection closed",
+            "terminating connection due to administrator command",
+        ] {
+            assert!(
+                is_transient_postgres_error(detail),
+                "should retry: {detail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_sqlstates_are_retried() {
+        // 08 connection_exception, 40001 serialization_failure,
+        // 40P01 deadlock_detected, 53000/53300 insufficient resources,
+        // 57014 query_canceled, 58000 system error.
+        for code in [
+            "08006", "08003", "08001", "40001", "40P01", "53000", "53300", "57014", "58030",
+        ] {
+            let detail = format!("db error: {code}: something happened");
+            assert!(
+                is_transient_postgres_error(&detail),
+                "{code} should be transient"
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_sqlstates_are_not_retried() {
+        // 42xxx syntax/access rule, 22xxx data exception, 23xxx integrity
+        // constraint, 42703 undefined column, 23505 duplicate key.
+        for code in [
+            "42601", "42501", "42P01", "22003", "23505", "23502", "42703", "22P02",
+        ] {
+            let detail = format!("db error: {code}: permanent problem");
+            assert!(
+                !is_transient_postgres_error(&detail),
+                "{code} must not be retried"
+            );
+        }
+    }
+
+    #[test]
+    fn unparseable_errors_default_to_permanent() {
+        // When we cannot tell, do not retry: a wrong retry silently duplicates
+        // work, while a missing one just surfaces the error sooner.
+        for detail in ["", "something went wrong", "db error: no code here"] {
+            assert!(!is_transient_postgres_error(detail), "{detail:?}");
+        }
+    }
+
+    #[test]
+    fn retry_backoff_is_capped_for_a_configured_policy() {
+        let policy = crate::httpclient::RetryPolicy::new(
+            10,
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(400),
+        );
+        for attempt in 1..=10 {
+            assert!(
+                policy.backoff(attempt) <= std::time::Duration::from_millis(400),
+                "attempt {attempt} exceeded the cap"
+            );
         }
     }
 }

@@ -1,7 +1,7 @@
 //! End-to-end tests for the tptforge CLI library: TOML pipeline execution,
 //! spec parsing, schema, and preview.
 
-use tpt_stream_cli::{parse_pipeline_toml, preview_command, run_command, schema_command};
+use tpt_stream_cli::{parse_pipeline_toml, preview_command, run_command_default, schema_command};
 
 fn write(path: &std::path::Path, content: &str) {
     if let Some(parent) = path.parent() {
@@ -64,7 +64,7 @@ csv = "{out_csv}"
     let pipeline_file = dir.path().join("pipeline.toml");
     write(&pipeline_file, &toml);
 
-    let summary = run_command(&pipeline_file, true).await.unwrap();
+    let summary = run_command_default(&pipeline_file, true).await.unwrap();
     assert!(summary.contains("100 rows"), "{summary}");
 
     let out = std::fs::read_to_string(&out_csv).unwrap();
@@ -98,7 +98,7 @@ async fn toml_pipeline_jsonl_source() {
     let pipeline_file = dir.path().join("pipeline.toml");
     write(&pipeline_file, &toml);
 
-    run_command(&pipeline_file, true).await.unwrap();
+    run_command_default(&pipeline_file, true).await.unwrap();
     let out = std::fs::read_to_string(&out_jsonl).unwrap();
     let mut lines: Vec<&str> = out.lines().collect();
     lines.sort();
@@ -175,7 +175,7 @@ async fn retired_yaml_pipelines_are_rejected_with_a_hint() {
     let pipeline_file = dir.path().join("pipeline.yaml");
     write(&pipeline_file, "source:\n  csv: { path: in.csv }\n");
 
-    let err = run_command(&pipeline_file, true).await.unwrap_err();
+    let err = run_command_default(&pipeline_file, true).await.unwrap_err();
     let message = format!("{err:#}");
     assert!(message.contains("TOML"), "{message}");
 }
@@ -220,7 +220,7 @@ async fn starter_template_runs_end_to_end() {
     let pipeline_file = dir.path().join("pipeline.toml");
     write(&pipeline_file, &toml);
 
-    let summary = run_command(&pipeline_file, true).await.unwrap();
+    let summary = run_command_default(&pipeline_file, true).await.unwrap();
     assert!(summary.contains("3 rows"), "{summary}");
 
     let out = std::fs::read_to_string(&out_csv).unwrap();
@@ -251,7 +251,7 @@ async fn schema_and_preview_commands() {
 
 #[tokio::test]
 async fn run_reports_missing_files_clearly() {
-    let err = run_command(std::path::Path::new("no/such/pipeline.yaml"), true)
+    let err = run_command_default(std::path::Path::new("no/such/pipeline.yaml"), true)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("reading pipeline file"), "{err}");

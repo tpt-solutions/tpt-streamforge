@@ -119,6 +119,30 @@ impl<R: Read> ColumnarReader<R> {
         &self.headers
     }
 
+    /// Build a reader over a record-aligned slice of a larger CSV document, so
+    /// several slices can be parsed independently and concurrently.
+    ///
+    /// Unlike [`from_reader`](Self::from_reader) no header record is consumed —
+    /// the slice's first record is data — so `num_columns` must be the column
+    /// count taken from the document's header, and [`headers`](Self::headers)
+    /// returns an empty record. `first_record` is the 1-based record number of
+    /// the slice's first record in whole-document coordinates, so ragged-row
+    /// and UTF-8 errors report the position a sequential parse would.
+    ///
+    /// The slice must begin exactly on a record boundary; use
+    /// [`crate::find_chunk_boundaries`] to compute safe offsets.
+    pub fn from_slice(reader: R, num_columns: usize, first_record: u64) -> Self {
+        let mut builder = ReaderBuilder::new();
+        builder.has_headers(false).start_line(first_record);
+        ColumnarReader {
+            reader: builder.from_reader(reader),
+            headers: StringRecord::new(),
+            num_columns,
+            scratch_arena: Vec::with_capacity(num_columns * 16),
+            scratch_cells: Vec::with_capacity(num_columns),
+        }
+    }
+
     pub fn num_columns(&self) -> usize {
         self.num_columns
     }

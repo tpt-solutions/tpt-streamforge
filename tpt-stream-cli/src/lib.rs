@@ -31,6 +31,7 @@
 //! rows. Sources and sinks cover local files (CSV/JSONL/JSON/`.tptcol`,
 //! `.gz`-compressed), SQLite, PostgreSQL, S3/GCS/Azure, and plain HTTP URLs.
 
+pub mod metrics;
 pub mod sql;
 
 use std::collections::BTreeMap;
@@ -589,6 +590,16 @@ pub enum Command {
         /// Hide the progress bar.
         #[arg(long)]
         quiet: bool,
+        /// Serve Prometheus metrics on this address while the run is in
+        /// progress (e.g. `127.0.0.1:9464`; scrape `/metrics`).
+        ///
+        /// The endpoint is bound before the pipeline starts, so a port
+        /// conflict fails the run immediately instead of silently.
+        #[arg(long, value_name = "ADDR")]
+        metrics: Option<String>,
+        /// Value of the `pipeline` label on the exported metrics.
+        #[arg(long, default_value = "tptforge")]
+        metrics_name: String,
     },
     /// Run a single-table SQL SELECT against a file or URL.
     ///
@@ -624,8 +635,15 @@ pub enum Command {
     },
 }
 
-/// Attach a spinner progress bar to the pipeline's telemetry.
-fn attach_progress(pipeline: &mut Pipeline) {
+/// Attach a spinner progress bar to the pipeline's telemetry, and optionally
+/// feed the Prometheus collector from the same event stream.
+///
+/// `on_progress` holds exactly one hook, so both consumers have to be driven
+/// from a single closure rather than registered separately.
+fn attach_progress(
+    pipeline: &mut Pipeline,
+    collector: Option<std::sync::Arc<crate::metrics::Metrics>>,
+) {
     let bar = ProgressBar::new_spinner();
     bar.enable_steady_tick(Duration::from_millis(120));
     bar.set_style(
@@ -636,6 +654,9 @@ fn attach_progress(pipeline: &mut Pipeline) {
     let bar = Mutex::new(bar);
     pipeline.on_progress(std::sync::Arc::new(move |event| {
         use tpt_stream_core::TelemetryEvent::*;
+        if let Some(collector) = &collector {
+            collector.on_event(event);
+        }
         let locked = bar.lock().unwrap();
         match event {
             SourceBatch { total_rows, .. } => {
@@ -679,8 +700,21 @@ pub async fn sql_command(
     }
 }
 
+/// Execute `tptforge run` with the metrics endpoint disabled.
+///
+/// Convenience wrapper over [`run_command`] for embedders and tests that only
+/// need the plain run behavior.
+pub async fn run_command_default(pipeline_path: &std::path::Path, quiet: bool) -> Result<String> {
+    run_command(pipeline_path, quiet, None, "tptforge".to_string()).await
+}
+
 /// Execute `tptforge run`.
-pub async fn run_command(pipeline_path: &std::path::Path, quiet: bool) -> Result<String> {
+pub async fn run_command(
+    pipeline_path: &std::path::Path,
+    quiet: bool,
+    metrics_addr: Option<String>,
+    metrics_name: String,
+) -> Result<String> {
     let text = std::fs::read_to_string(pipeline_path)
         .with_context(|| format!("reading pipeline file {}", pipeline_path.display()))?;
     if is_yaml_path(pipeline_path) {
@@ -694,10 +728,46 @@ pub async fn run_command(pipeline_path: &std::path::Path, quiet: bool) -> Result
     let spec: PipelineSpec = parse_pipeline_toml(&text)
         .with_context(|| format!("parsing pipeline TOML {}", pipeline_path.display()))?;
     let mut pipeline = build_pipeline(&spec)?;
-    if !quiet {
-        attach_progress(&mut pipeline);
+
+    // Serve metrics first: binding before the run means a port conflict is a
+    // hard error the caller sees, not a silent no-op.
+    let metrics = match metrics_addr {
+        Some(addr) => {
+            let collector = std::sync::Arc::new(metrics::Metrics::new());
+            let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let bound = metrics::serve(&addr, metrics_name, collector.clone(), shutdown.clone())
+                .with_context(|| format!("binding metrics endpoint on {addr}"))?;
+            eprintln!("metrics: http://{bound}/metrics");
+            Some((collector, shutdown))
+        }
+        None => None,
+    };
+
+    // Telemetry feeds the progress bar and the metrics collector from one
+    // hook, so `--quiet` and `--metrics` are independent rather than exclusive.
+    let collector_for_hook = metrics.as_ref().map(|(c, _)| c.clone());
+    if quiet {
+        if let Some(collector) = collector_for_hook {
+            pipeline.on_progress(std::sync::Arc::new(move |event| {
+                collector.on_event(event);
+            }));
+        }
+    } else {
+        attach_progress(&mut pipeline, collector_for_hook);
     }
-    let stats = pipeline.execute().await?;
+
+    let result = pipeline.execute().await;
+    if let Some((collector, shutdown)) = &metrics {
+        // Report the final totals even on failure, so a scrape after the run
+        // still shows what it managed to do.
+        if let Ok(stats) = &result {
+            collector.finish(stats.rows, stats.batches);
+        } else {
+            collector.finish(0, 0);
+        }
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let stats = result?;
     Ok(format!(
         "{} rows in {} batch(es), {} bytes out, in {:.1?}",
         stats.rows, stats.batches, stats.bytes_out, stats.elapsed

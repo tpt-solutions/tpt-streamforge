@@ -8,6 +8,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-row dead-letter queue** — `Pipeline::dead_letter(path)` captures rows a
+  *stage* rejects to a CSV file instead of aborting the run, so a long job
+  finishes with the bad rows preserved rather than lost. The offending row is
+  isolated by binary-narrowing the failing batch (O(log n) stage calls per bad
+  row), and surviving rows continue **in their original order**. Stateful stages
+  (aggregate, sort, dedup, join, expect) fail with a clear config error under a
+  dead-letter queue rather than silently mis-aggregating, since narrowing would
+  re-run them over a subset of their input.
+- **`tracing` instrumentation** — a new opt-in `tracing` feature (off by
+  default; the default dependency set and the wasm sync-only build are
+  unchanged). Install any `tracing` subscriber and the engine emits the same
+  event stream as `on_progress`, plus HTTP-retry and dead-letter events, under
+  filterable targets (`tpt_stream_core::pipeline`, `::httpclient`,
+  `::dead_letter`).
+- **Prometheus metrics endpoint** — `tptforge run --metrics 127.0.0.1:9464`
+  serves `/metrics` in Prometheus text format during a run (rows, batches,
+  per-stage rows in/out, dead-letter rows, running gauge). Off by default and
+  dependency-free — just `std::net::TcpListener`. OpenTelemetry is deliberately
+  not included: an OTLP exporter would add a dependency the project's
+  minimal-tree policy avoids.
+- **Retry/backoff for network sources & sinks** — S3/GCS/Azure/HTTP requests can
+  retry transient failures (connection resets, 408, 429, 5xx) with exponential
+  backoff and jitter. Opt-in per store (`S3Store::with_retry`); the default is
+  no retry, so existing behavior is unchanged. Client errors still fail fast.
+  The PostgreSQL sink's retry is now configurable the same way
+  (`PostgresSink::with_retry`), classifying failures on SQLSTATE so a dropped
+  connection, deadlock, or serialization failure retries while a constraint
+  violation fails immediately. Its default remains the sink's original single
+  immediate reconnect.
+- **Parallel CSV ingestion** — whole-buffer CSV inputs of at least 1 MiB are
+  split at record boundaries and parsed across the rayon pool, making large
+  CSV reads ~4x faster (465 ms → 116 ms on a 400k-row × 16-column input; see
+  `cargo bench -p tpt-stream-core --bench phase3 -- csv_ingest`). The new
+  `tpt_csv::find_chunk_boundaries` pre-scan is quote-aware, so slicing never
+  breaks a quoted field; ragged-row errors still report whole-document line
+  numbers, and type inference is unchanged. Applies to the whole-buffer
+  `csv_to_batches` / `read_csv_batches` paths; the bounded-memory streaming
+  `CsvSource` stays sequential by design, as do `.gz` inputs.
 - **SQLite sink/source** (`sqlite` feature, `tpt-stream-core`) — `SqliteSink`
   writes batches into a SQLite table (auto-creates schema from the first batch,
   batches inserts in a transaction, `overwrite()` mode drops the table first,

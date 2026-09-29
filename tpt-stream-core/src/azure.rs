@@ -157,6 +157,14 @@ impl AzureBlobStore {
         &self.container
     }
 
+    /// Retry transient request failures (connection resets, 408/429/5xx)
+    /// according to `policy`. Off by default.
+    #[must_use]
+    pub fn with_retry(mut self, policy: crate::httpclient::RetryPolicy) -> Self {
+        self.agent = self.agent.with_retry(policy);
+        self
+    }
+
     /// Sign a Blob service request (Shared Key, 2015+ scheme) and return the
     /// `Authorization` header value.
     ///

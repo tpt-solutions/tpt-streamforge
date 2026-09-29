@@ -170,6 +170,14 @@ impl S3Store {
         })
     }
 
+    /// Retry transient request failures (connection resets, 408/429/5xx)
+    /// according to `policy`. Off by default.
+    #[must_use]
+    pub fn with_retry(mut self, policy: crate::httpclient::RetryPolicy) -> Self {
+        self.agent = self.agent.with_retry(policy);
+        self
+    }
+
     /// Override the SigV4 signing region (defaults to `us-east-1`).
     pub fn with_region(mut self, region: &str) -> Self {
         let base_url = self.bucket.base_url().clone();

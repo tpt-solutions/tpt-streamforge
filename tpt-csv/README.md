@@ -53,6 +53,47 @@ line-numbered errors or quarantines them) inspect `record.len()` and decide.
 `ReaderBuilder::flexible` and `WriterBuilder::flexible` are accepted as no-ops
 so switching from the `csv` crate is a one-line dependency change.
 
+## Columnar and parallel parsing
+
+Beyond the row-at-a-time `Reader`, the crate parses straight into per-column
+(column-major) arenas:
+
+```rust
+use tpt_csv::{ColumnarChunk, ColumnarReader, RaggedRowPolicy};
+
+let mut reader = ColumnarReader::from_reader("a,b\n1,x\n2,y\n".as_bytes())?;
+let mut chunk = ColumnarChunk::new(reader.num_columns(), 64);
+let mut policy = RaggedRowPolicy::Strict;
+reader.read_chunk_into(64, &mut policy, &mut chunk)?;
+assert_eq!(chunk.column_bytes(0).collect::<Vec<_>>(), vec!["1", "2"]);
+# Ok::<(), tpt_csv::Error>(())
+```
+
+`RaggedRowPolicy` selects what happens to a row whose field count doesn't match
+the header: `Strict` errors, `Skip` drops it, `Quarantine` hands it to a
+callback (the engine writes it to a quarantine file).
+
+A whole buffer can also be split so several slices parse concurrently:
+
+```rust
+use tpt_csv::{find_chunk_boundaries, first_record_end};
+
+let buf = std::fs::read("big.csv")?;
+let data = &buf[first_record_end(&buf).unwrap()..];
+for b in find_chunk_boundaries(data, 65_536) {
+    // `&data[..b.offset]` and `&data[b.offset..]` are independently parseable.
+    let _ = &data[b.offset..];
+}
+# Ok::<(), std::io::Error>(())
+```
+
+`find_chunk_boundaries` is a single quote-aware pre-scan, so the offsets it
+returns always begin a record — including when fields contain embedded
+newlines, escaped quotes, or `\r\n`. Each `ChunkBoundary` also carries the
+1-based record number at its offset; pass it to `ColumnarReader::from_slice`
+(or `ReaderBuilder::start_line`) so parse errors keep whole-document line
+numbers. The engine uses exactly this to parallelize large CSV reads.
+
 ## Design notes
 
 - **No allocation per record on the read path**: `StringRecord` keeps one
@@ -60,6 +101,8 @@ so switching from the `csv` crate is a one-line dependency change.
   are borrowed slices via `get`/`iter`.
 - **Fixed 64 KiB read buffer** through `BufReader`, so peak memory is the
   buffer plus the current record, not the file.
+- **SWAR scanning**: record scanning tests 8 bytes at a time for CSV-special
+  bytes (`,`, `"`, `\n`, `\r`) before falling back to a byte loop.
 - **Quote-only-when-needed** on write (matches the `csv` crate's default), so
   output is byte-identical for ordinary data and stays Excel-friendly.
 - **Line numbers** are tracked for error messages: `Reader::position()` (the
@@ -75,4 +118,7 @@ cargo test -p tpt-csv
 
 Covers plain/quoted/embedded-newline fields, escaped quotes, `\r\n`, empty
 fields, ragged rows, headers, positions, invalid UTF-8, and EOF edge cases
-(`""`, trailing field without a newline, empty input).
+(`""`, trailing field without a newline, empty input), plus the columnar
+reader (simple/quoted/ragged rows under each policy, chunk bounds) and the
+boundary scanner — including a check that slicing at the reported offsets
+reproduces a sequential parse exactly.

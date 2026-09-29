@@ -174,6 +174,24 @@ Per-stage throughput from the criterion suite (`cargo bench --bench stages`,
 | CSV → CSV copy | 832 ms | ≈ 1.2M rows/s |
 | `sort` (external merge sort) | 1.32 s | ≈ 0.76M rows/s |
 
+### Parallel CSV ingestion
+
+Whole-buffer CSV inputs of at least 1 MiB — the in-memory `csv_to_batches`
+path (Python/WASM/FFI) and the join build-relation reader — are split at
+record boundaries and parsed across all cores. The split is quote-aware, so
+quoted fields containing newlines are never cut in half, and the result is
+identical to the sequential path: same batches, same type inference, same
+error line numbers.
+
+| input (400k rows × 16 cols, in memory) | time |
+| --- | --- |
+| sequential | 465 ms |
+| parallel | **116 ms** (≈ 4.0x) |
+
+Reproduce with `cargo bench -p tpt-stream-core --bench phase3 -- csv_ingest`.
+The streaming `CsvSource` behind `Pipeline::read_csv` stays sequential — it
+never holds the whole input, so there is nothing to split.
+
 ### Comparison with pandas and DuckDB
 
 Same machine (Intel i5-13500, Windows 11, warm file cache), same 1M-row CSV;

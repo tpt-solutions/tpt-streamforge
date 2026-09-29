@@ -6,6 +6,48 @@ the [root CHANGELOG](../CHANGELOG.md).
 ## [Unreleased]
 
 ### Added
+- **Per-row dead-letter queue** — `Pipeline::dead_letter(path)` captures rows a
+  *stage* rejects (a `map` returning the wrong width for one row, a failing
+  expression) to a CSV file instead of aborting the run, so a long job finishes
+  and the rejected rows are preserved. The offending row is isolated by
+  re-running the stage over progressively smaller halves (O(log n) stage calls
+  per bad row); surviving rows continue through the pipeline **in their original
+  order**. The file has `_dead_letter_stage` and `_error` columns ahead of the
+  row's own fields, and is written lazily, so a clean run leaves it empty.
+  This is the stage-level counterpart to `ErrorPolicy::Quarantine`, which
+  handles malformed *input* rows; the two are independent.
+  Stateful stages (`GroupByAgg`, `Sort`, `Deduplicate`, `HashJoin`, `expect`)
+  return a clear `Error::Config` if they fail under a dead-letter queue rather
+  than silently re-aggregating a subset of their input.
+- **`tracing` instrumentation** behind the new opt-in `tracing` feature (off by
+  default, so the dependency set and the wasm sync-only build are unchanged).
+  A `tracing` subscriber sees the same event stream as `on_progress`, plus
+  HTTP retry and dead-letter events, under filterable targets
+  (`tpt_stream_core::pipeline`, `::httpclient`, `::dead_letter`).
+- **Retry/backoff for network sources & sinks** — `httpclient::RetryPolicy`
+  (attempts, base delay, cap) with exponential backoff and jitter, for the
+  S3/GCS/Azure/HTTP request path. Only transient failures retry (transport
+  errors, 408, 429, 5xx); a 4xx still fails fast. Opt-in via
+  `S3Store::with_retry` / `AzureBlobStore::with_retry`; the default is no retry,
+  so existing behavior is unchanged. `PostgresSink::with_retry` does the same
+  for `COPY ... FROM STDIN`, classifying on SQLSTATE so a constraint violation
+  fails immediately while a dropped connection, deadlock, or serialization
+  failure retries. Its default is one immediate reconnect — the sink's previous
+  behavior — so nothing changes unless asked.
+- **Parallel whole-buffer CSV ingestion** — CSV inputs of at least
+  `source::PARALLEL_CSV_MIN_BYTES` (1 MiB) are split at record boundaries with
+  `tpt_csv::find_chunk_boundaries` and parsed across the rayon pool, then
+  assembled into batches in slice order. Applies to `csv_to_batches` and
+  `read_csv_batches` (the join build-relation reader); the bounded-memory
+  streaming `CsvSource` stays sequential by design, and `.gz` inputs stay on
+  the streaming decompression path. Measured **~4.0x faster** ingestion
+  (465 ms → 116 ms) on a 400k-row x 16-column input
+  (`cargo bench -p tpt-stream-core --bench phase3 -- csv_ingest`).
+  Slicing is transparent: identical batches, identical type inference, and
+  ragged-row errors still report whole-document line numbers.
+- `source::csv_to_batches_sequential` — parse in-memory CSV on the calling
+  thread, bypassing the threshold (used by the bench, and an escape hatch for
+  callers that must stay single-threaded).
 - `date` (`YYYY-MM-DD` → days since epoch) and `timestamp` (ISO 8601,
   microseconds since epoch) data types, inferred from CSV/JSONL input,
   sortable, comparable against ISO strings in the expression language,

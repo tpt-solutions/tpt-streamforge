@@ -13,8 +13,13 @@ async fn main() {
 async fn real_main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run { pipeline, quiet } => {
-            let summary = run_command(&pipeline, quiet)
+        Command::Run {
+            pipeline,
+            quiet,
+            metrics,
+            metrics_name,
+        } => {
+            let summary = run_command(&pipeline, quiet, metrics, metrics_name)
                 .await
                 .with_context(|| format!("running {}", pipeline.display()))?;
             println!("{summary}");

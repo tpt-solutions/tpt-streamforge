@@ -57,5 +57,81 @@ fn bench_aggregate_10m(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_aggregate_10m);
+/// A wide numeric CSV: the shape that stresses per-row parsing rather than
+/// per-field string handling, and the case whole-buffer ingestion is tuned for.
+fn generate_wide_numeric(path: &str, rows: usize, columns: usize) {
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    let header: Vec<String> = (0..columns).map(|c| format!("c{c}")).collect();
+    writeln!(f, "{}", header.join(",")).unwrap();
+    for r in 0..rows {
+        let row: Vec<String> = (0..columns)
+            .map(|c| ((r * (c + 7)) % 100_000).to_string())
+            .collect();
+        writeln!(f, "{}", row.join(",")).unwrap();
+    }
+    f.flush().unwrap();
+}
+
+/// Compare the sequential and parallel whole-buffer CSV ingestion paths on the
+/// same in-memory input.
+///
+/// The parallel path splits the buffer at record boundaries and parses the
+/// slices across the rayon pool, so this isolates the Phase 3 boundary-scan +
+/// rayon work: both entries do identical parsing, differing only in threading.
+/// The sequential entry forces the old path by staying under the parallel
+/// threshold, so run this on a multi-core machine for a meaningful number.
+fn bench_csv_ingest(c: &mut Criterion) {
+    let dir = std::env::temp_dir();
+    let path = dir.join("tpt-streamforge-csv-ingest-wide.csv");
+    let rows = 400_000usize;
+    let columns = 16usize;
+    let path_str = path.to_string_lossy().into_owned();
+    generate_wide_numeric(&path_str, rows, columns);
+    let text = std::fs::read_to_string(&path).unwrap();
+    // Comfortably above the 1 MiB threshold so `csv_to_batches` takes the
+    // parallel path; assert it rather than trusting the fixture size.
+    assert!(text.len() >= tpt_stream_core::source::PARALLEL_CSV_MIN_BYTES);
+    let chunk_rows = 65_536usize;
+
+    let mut group = c.benchmark_group("csv_ingest_wide_numeric");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(10);
+
+    let expected_rows = rows;
+    group.bench_function("parallel", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let batches = tpt_stream_core::source::csv_to_batches(&text, chunk_rows).unwrap();
+                total += start.elapsed();
+                assert_eq!(
+                    batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+                    expected_rows
+                );
+            }
+            total
+        });
+    });
+
+    group.bench_function("sequential", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let batches =
+                    tpt_stream_core::source::csv_to_batches_sequential(&text, chunk_rows).unwrap();
+                total += start.elapsed();
+                assert_eq!(
+                    batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+                    expected_rows
+                );
+            }
+            total
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_aggregate_10m, bench_csv_ingest);
 criterion_main!(benches);

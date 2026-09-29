@@ -28,12 +28,14 @@
 
 pub mod columnar;
 mod error;
+pub mod parallel;
 mod reader;
 mod record;
 mod writer;
 
 pub use columnar::{ColumnarChunk, ColumnarReader, RaggedRowPolicy};
 pub use error::{Error, Result};
+pub use parallel::{find_chunk_boundaries, first_record_end, ChunkBoundary};
 pub use reader::{Position, Reader, ReaderBuilder};
 pub use record::StringRecord;
 pub use writer::{Writer, WriterBuilder};

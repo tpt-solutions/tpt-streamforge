@@ -113,6 +113,35 @@ scalar shorthand (`csv = "out.csv"`).
 (default: fail with a line number), `"skip"`, or `"quarantine:<path>"` (drop
 the row and capture it).
 
+## Metrics
+
+`--metrics` serves a Prometheus endpoint for the duration of the run:
+
+```sh
+tptforge run pipeline.toml --metrics 127.0.0.1:9464
+curl http://127.0.0.1:9464/metrics
+```
+
+```
+tptforge_rows{pipeline="tptforge"} 1048576
+tptforge_batches{pipeline="tptforge"} 16
+tptforge_stage_rows{pipeline="tptforge",stage="filter",dir="in"} 1048576
+tptforge_stage_rows{pipeline="tptforge",stage="filter",dir="out"} 812345
+tptforge_dead_letter_rows{pipeline="tptforge"} 0
+tptforge_running{pipeline="tptforge"} 1
+```
+
+Counters come from the engine's telemetry stream, so they match
+`Pipeline::stage_stats()`. `--metrics-name` sets the `pipeline` label
+(default `tptforge`). The address is bound *before* the pipeline starts, so a
+port conflict fails the command rather than silently doing nothing. Combine
+freely with `--quiet`; the two drive one telemetry hook.
+
+Off unless the flag is passed, and it adds no dependency — the endpoint is
+`std::net::TcpListener` and a small text-format renderer. OpenTelemetry is not
+offered: an OTLP exporter would add a dependency this project deliberately
+avoids.
+
 ## SQL
 
 ```sh

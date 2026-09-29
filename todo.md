@@ -322,17 +322,69 @@ just documented as an approved exception (unlike the existing build-time-only
       bare-directory failure) directly in `tpt-stream-wasm/README.md`
 
 ### Observability
-- [ ] Add `tracing` instrumentation to `tpt-stream-core` pipeline execution,
+- [x] Add `tracing` instrumentation to `tpt-stream-core` pipeline execution,
       sources, and sinks, feature-gated so wasm's sync/std-only build is
       unaffected
-- [ ] Optional: opt-in Prometheus/OpenTelemetry exporter in `tpt-stream-cli`
+      **Implementation**: new optional `tracing` feature (off by default;
+      `tracing` is MIT, so `cargo deny` stays green). A `trace_event!` macro in
+      `telemetry/macros.rs` has two arms — it forwards to `tracing::event!` when
+      the feature is on and expands to nothing when off, so call sites read
+      identically either way and cost zero when disabled. Instrumented: every
+      `TelemetryEvent` (a subscriber sees the same stream as `on_progress`),
+      each HTTP retry, and each dead-letter capture. Targets are namespaced
+      (`tpt_stream_core::pipeline`, `::httpclient`, `::dead_letter`) for
+      filtering. The existing `ProgressHook` is untouched — the two are
+      independent.
+- [x] Optional: opt-in Prometheus/OpenTelemetry exporter in `tpt-stream-cli`
       fed by existing `Pipeline::stage_stats()`
+      **Implementation**: `tptforge run --metrics <ADDR> --metrics-name <NAME>`
+      serves `/metrics` in Prometheus text format, driven by the engine's
+      telemetry stream (`metrics` module; 10 tests including a live HTTP
+      scrape). Off by default, std `TcpListener` only, no new dependency.
+      OpenTelemetry is **not** implemented — an OTLP exporter needs a dependency
+      that conflicts with the minimal-tree policy, and Prometheus text format is
+      the portable, dependency-free choice.
 
 ### Engine Feature Gaps
-- [ ] Parquet read/write (new optional `parquet` feature flag)
-- [ ] Per-row dead-letter queue for stage-level errors (extend quarantine
+- [x] Per-row dead-letter queue for stage-level errors (extend quarantine
       semantics beyond source-level `ErrorPolicy`)
-- [ ] Retry/backoff for network sources & sinks (S3/GCS/Azure/HTTP/Postgres)
+      **Implementation**: `Pipeline::dead_letter(path)` captures rows a *stage*
+      rejects instead of aborting the run. `isolate_and_capture` binary-narrows
+      a failing batch (halve, re-run, recurse) at O(log n) stage calls per bad
+      row, writing bad rows to CSV with `_dead_letter_stage`, `_error`, then the
+      row's own fields. The header is written lazily, so a clean run leaves an
+      empty file rather than a header for a schema nobody saw. Survivors are
+      re-assembled in original input order (FIFO plus a row index; a LIFO stack
+      emits them out of sequence, which the tests pin down).
+      **Deliberate limit**: stateful stages (`GroupByAgg`, `Sort`,
+      `Deduplicate`, `HashJoin`, `expect`) fail with a clear `Error::Config`
+      rather than silently mis-aggregating, because narrowing would re-run them
+      over a subset of their input. 13 tests.
+- [x] Retry/backoff for network sources & sinks (S3/GCS/Azure/HTTP/Postgres)
+      **Implementation**: `httpclient::RetryPolicy` (attempts, base delay, cap)
+      with exponential backoff plus deterministic jitter, applied in
+      `execute_with_retry`. Only *transient* failures retry — transport errors
+      and 408/429/5xx; a 4xx fails fast because retrying it cannot help. Opt-in
+      via `S3Store::with_retry` / `AzureBlobStore::with_retry`; the **default is
+      no retry**, so existing behavior is bit-for-bit unchanged. A retry re-sends
+      an identical body, which is safe for the idempotent requests the cloud
+      modules issue. 7 tests.
+      **Postgres sink**: the pre-existing "retry once on connection loss" is now
+      `PostgresSink::with_retry(RetryPolicy)`. The default `DEFAULT_PG_RETRY` is
+      one immediate reconnect with no delay, i.e. exactly the old behavior.
+      `is_transient_postgres_error` classifies on SQLSTATE — `08` (connection),
+      `40001`/`40P01` (serialization, deadlock), `53`, `57`, `58` retry; `42xxx`
+      (syntax/access), `22xxx`/`23xxx` (data/constraint) and anything
+      unparseable fail immediately rather than burning connections on a fault
+      that cannot resolve itself. Unparseable errors default to permanent on
+      purpose. 9 tests.
+- [ ] Parquet read/write (new optional `parquet` feature flag)
+      **Rejected by policy (2026-09-29)** — contradicts `spec.txt` ("we reject
+      heavy, complex dependencies (like `parquet`, `wasmtime`) even if they're
+      permissively licensed") and `WHY.md` ("no `parquet`, no `wasmtime`, no
+      Arrow ... builds narrower replacements instead"). Arrow was already
+      removed for this reason; `.tptcol` is the project's answer to Parquet.
+      Revisit only as a deliberate policy change, not a feature request.
 - [ ] Window functions (row_number/rank/running totals) — stretch goal
 - Not planned now (logged as future-phase ideas): Kafka/streaming sources,
   Delta/Iceberg, Arrow interop, checkpointing/resume
@@ -381,13 +433,31 @@ improvement for any consumer, and delete the workaround code in
       `build_csv_batch_from_chunk`/`build_csv_column_from_iter`) to consume
       `ColumnarReader`, dropping the hand-rolled row-major arena + strided
       transpose; all 38 unit tests + 9 roundtrip tests pass
-- [ ] Phase 3: `tpt_csv::find_chunk_boundaries` (sequential, quote-aware
+- [x] Phase 3: `tpt_csv::find_chunk_boundaries` (sequential, quote-aware
       pre-scan for parallel-safe split points); use it in `tpt-stream-core`
       (already depends on `rayon`) to parallelize the whole-buffer
       `csv_to_batches` / `read_csv_batches` paths only — the bounded-memory
       streaming `CsvSource` stays sequential by design
-- [ ] Add `criterion` bench (wide numeric CSV) comparing old vs. new CSV
+      **Implementation**: `tpt-csv/src/parallel.rs` adds
+      `find_chunk_boundaries` + `first_record_end` + `ChunkBoundary`, sharing
+      one quote state machine with the reader (19 tests, including a
+      split-transparency property check over quoted/CRLF/no-trailing-newline
+      input). `ColumnarReader::from_slice` parses a headerless slice given the
+      document's column count, and `ReaderBuilder::start_line` keeps
+      `Error::Ragged { line }` in whole-document coordinates so error messages
+      are unchanged by slicing. `source.rs::csv_bytes_to_batches` reads the
+      header once, then parses slices with `par_iter` and builds batches in
+      slice order (so type inference still sees the first rows first).
+      Gated at `PARALLEL_CSV_MIN_BYTES` (1 MiB); `.gz` inputs stay on the
+      streaming decompression path. 9 new tests; full suite 210 pass.
+- [x] Add `criterion` bench (wide numeric CSV) comparing old vs. new CSV
       ingestion path in `tpt-stream-core`'s bench suite before/after Phase 2
+      **Result**: `csv_ingest_wide_numeric` in `benches/phase3.rs` compares
+      `csv_to_batches` (parallel) against the new
+      `csv_to_batches_sequential` escape hatch on identical 400k-row x 16-col
+      input: **465 ms -> 116 ms (~4.0x)** on this machine. Note the pre-Phase-2
+      row-major path is gone, so the comparison is parallel vs. sequential
+      rather than old vs. new.
 - [x] Add `ColumnarReader` unit tests (simple/quoted/ragged rows under
       strict/skip/quarantine; chunk-size bounds; 6 tests in columnar.rs)
 

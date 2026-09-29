@@ -19,11 +19,15 @@ impl Position {
 #[derive(Debug, Clone, Copy)]
 pub struct ReaderBuilder {
     has_headers: bool,
+    start_line: u64,
 }
 
 impl Default for ReaderBuilder {
     fn default() -> Self {
-        ReaderBuilder { has_headers: true }
+        ReaderBuilder {
+            has_headers: true,
+            start_line: 1,
+        }
     }
 }
 
@@ -47,12 +51,23 @@ impl ReaderBuilder {
         self
     }
 
+    /// 1-based record number to report for the *first* record read. Defaults
+    /// to `1`.
+    ///
+    /// Set this when parsing a record-aligned slice of a larger document (see
+    /// [`crate::find_chunk_boundaries`]) so [`Reader::position`] and the
+    /// `line` in parse errors stay in whole-document coordinates.
+    pub fn start_line(&mut self, line: u64) -> &mut Self {
+        self.start_line = line;
+        self
+    }
+
     pub fn from_reader<R: Read>(&self, reader: R) -> Reader<R> {
         Reader {
             inner: BufReader::with_capacity(64 * 1024, reader),
             has_headers: self.has_headers,
             headers: None,
-            line: 1,
+            line: self.start_line,
         }
     }
 }
