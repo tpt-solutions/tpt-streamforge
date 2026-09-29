@@ -13,8 +13,16 @@
 //! actually need: GET/PUT/POST/DELETE over HTTPS with a byte-slice body,
 //! a streaming response body (fixed Content-Length or chunked transfer
 //! encoding), and header/status access. No connection pooling, no
-//! redirects, no HTTP/1.0 or plaintext HTTP support — every request opens
-//! a fresh TLS connection and closes it (`Connection: close`) when done.
+//! redirects, no HTTP/1.0 — every request opens a fresh TLS connection and
+//! closes it (`Connection: close`) when done. Plaintext `http://` is refused
+//! unless the host is loopback (mock servers, emulators) or the caller opts in
+//! with `TPT_ALLOW_INSECURE_HTTP=1`, because presigned URLs and `Authorization`
+//! headers would otherwise cross the network in the clear.
+//!
+//! The response parser treats the peer as untrusted: status/header/chunk lines
+//! and header counts are bounded, malformed or conflicting framing headers are
+//! rejected, and a body that ends before its declared length is an error
+//! rather than a silently truncated success.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -25,6 +33,60 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Longest status / header / chunk-size line accepted from a peer.
+const MAX_LINE_BYTES: u64 = 8 * 1024;
+/// Most response headers (or chunked trailers) accepted from a peer.
+const MAX_HEADERS: usize = 100;
+/// Longest body `Response::into_string` will buffer.
+const MAX_STRING_BODY: u64 = 16 * 1024 * 1024;
+
+/// Strip the query string and userinfo from a URL so it is safe to log or put
+/// in an error message: presigned URLs carry their signature (and STS session
+/// token) in the query.
+pub fn redact_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(u) => {
+            let mut out = format!("{}://{}", u.scheme(), u.host_str().unwrap_or("?"));
+            if let Some(port) = u.port() {
+                out.push_str(&format!(":{port}"));
+            }
+            out.push_str(u.path());
+            if u.query().is_some() {
+                out.push_str("?<redacted>");
+            }
+            out
+        }
+        Err(_) => "<invalid url>".to_string(),
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn insecure_http_allowed() -> bool {
+    std::env::var("TPT_ALLOW_INSECURE_HTTP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Read one line of at most `MAX_LINE_BYTES`, failing (rather than growing
+/// without bound) if the peer never sends a newline.
+fn read_line_limited<R: BufRead>(reader: &mut R, line: &mut String) -> io::Result<usize> {
+    let n = reader.by_ref().take(MAX_LINE_BYTES + 1).read_line(line)?;
+    if n as u64 > MAX_LINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("response line exceeds {MAX_LINE_BYTES} bytes"),
+        ));
+    }
+    Ok(n)
+}
 
 fn client_config() -> Arc<ClientConfig> {
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
@@ -200,6 +262,7 @@ pub struct RequestBuilder<'a> {
     method: &'static str,
     url: String,
     headers: Vec<(String, String)>,
+    invalid_header: Option<String>,
 }
 
 impl<'a> RequestBuilder<'a> {
@@ -209,15 +272,27 @@ impl<'a> RequestBuilder<'a> {
             method,
             url: url.to_string(),
             headers: Vec::new(),
+            invalid_header: None,
         }
     }
 
     pub fn set(mut self, key: &str, value: &str) -> Self {
-        self.headers.push((key.to_string(), value.to_string()));
+        // A CR/LF (or a ':' in the name) would let a caller-supplied value
+        // inject extra headers or split the request.
+        let bad = |s: &str| s.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0);
+        if bad(key) || bad(value) || key.is_empty() || key.contains(':') {
+            self.invalid_header
+                .get_or_insert_with(|| format!("invalid header {key:?}"));
+        } else {
+            self.headers.push((key.to_string(), value.to_string()));
+        }
         self
     }
 
     pub fn call(self) -> Result<Response, Error> {
+        if let Some(msg) = self.invalid_header {
+            return Err(Error::Transport(msg));
+        }
         execute_with_retry(
             &self.agent.config,
             self.agent.retry,
@@ -229,6 +304,9 @@ impl<'a> RequestBuilder<'a> {
     }
 
     pub fn send_bytes(self, body: &[u8]) -> Result<Response, Error> {
+        if let Some(msg) = self.invalid_header {
+            return Err(Error::Transport(msg));
+        }
         execute_with_retry(
             &self.agent.config,
             self.agent.retry,
@@ -272,7 +350,7 @@ fn execute_with_retry(
                     "tpt_stream_core::httpclient",
                     crate::telemetry::Level::INFO,
                     method,
-                    url,
+                    url = redact_url(url),
                     status = status.unwrap_or(0),
                     attempt,
                     delay_ms = delay.as_millis() as u64,
@@ -374,10 +452,21 @@ impl Response {
         Box::new(BodyReader { inner: self.body })
     }
 
+    /// Up to 512 bytes of the body as lossy text, for error messages. Never
+    /// reads more, so a hostile error page cannot exhaust memory.
+    pub fn error_snippet(self) -> String {
+        let mut reader = BodyReader { inner: self.body };
+        let mut buf = Vec::new();
+        let _ = (&mut reader).take(512).read_to_end(&mut buf);
+        String::from_utf8_lossy(&buf).chars().take(200).collect()
+    }
+
     pub fn into_string(self) -> Result<String, io::Error> {
         let mut reader = BodyReader { inner: self.body };
         let mut buf = String::new();
-        reader.read_to_string(&mut buf)?;
+        (&mut reader)
+            .take(MAX_STRING_BODY)
+            .read_to_string(&mut buf)?;
         Ok(buf)
     }
 }
@@ -397,6 +486,14 @@ impl Read for BodyReader {
                 }
                 let cap = (buf.len() as u64).min(*remaining) as usize;
                 let n = r.read(&mut buf[..cap])?;
+                if n == 0 {
+                    // Peer closed before delivering Content-Length bytes: a
+                    // truncated download must not look like a complete one.
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("response body ended {remaining} bytes early"),
+                    ));
+                }
                 *remaining -= n as u64;
                 Ok(n)
             }
@@ -406,20 +503,34 @@ impl Read for BodyReader {
                 }
                 if *remaining == 0 {
                     let mut line = String::new();
-                    r.read_line(&mut line)?;
+                    if read_line_limited(r, &mut line)? == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "chunked body ended before the terminating chunk",
+                        ));
+                    }
                     let size_str = line.trim().split(';').next().unwrap_or("").trim();
-                    let size = u64::from_str_radix(size_str, 16).map_err(|e| {
+                    let size = parse_chunk_size(size_str).ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("bad chunk size {line:?}: {e}"),
+                            format!("bad chunk size {line:?}"),
                         )
                     })?;
                     if size == 0 {
                         // Trailing headers (usually none), then the final CRLF.
+                        let mut trailers = 0;
                         loop {
                             let mut trailer = String::new();
-                            if r.read_line(&mut trailer)? == 0 || trailer.trim().is_empty() {
+                            if read_line_limited(r, &mut trailer)? == 0 || trailer.trim().is_empty()
+                            {
                                 break;
+                            }
+                            trailers += 1;
+                            if trailers > MAX_HEADERS {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "too many chunked trailers",
+                                ));
                             }
                         }
                         *finished = true;
@@ -429,6 +540,12 @@ impl Read for BodyReader {
                 }
                 let cap = (buf.len() as u64).min(*remaining) as usize;
                 let n = r.read(&mut buf[..cap])?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "chunk ended early",
+                    ));
+                }
                 *remaining -= n as u64;
                 if *remaining == 0 {
                     let mut crlf = [0u8; 2];
@@ -451,8 +568,8 @@ fn execute(
         .map_err(|e| Error::Transport(format!("invalid URL {url_str:?}: {e}")))?;
     let is_tls = match url.scheme() {
         "https" => true,
-        // Plain HTTP is only reachable for loopback test servers and the
-        // Azurite emulator; real cloud endpoints always use TLS.
+        // Plain HTTP is only for loopback test servers and emulators (or an
+        // explicit opt-in); real cloud endpoints always use TLS.
         "http" => false,
         other => {
             return Err(Error::Transport(format!(
@@ -462,8 +579,14 @@ fn execute(
     };
     let host = url
         .host_str()
-        .ok_or_else(|| Error::Transport(format!("URL {url_str:?} has no host")))?
+        .ok_or_else(|| Error::Transport(format!("URL {} has no host", redact_url(url_str))))?
         .to_string();
+    if !is_tls && !is_loopback_host(&host) && !insecure_http_allowed() {
+        return Err(Error::Transport(format!(
+            "refusing plaintext http:// to non-loopback host {host:?} (credentials and data \
+             would be sent unencrypted); use https:// or set TPT_ALLOW_INSECURE_HTTP=1"
+        )));
+    }
     let port = url
         .port_or_known_default()
         .unwrap_or(if is_tls { 443 } else { 80 });
@@ -493,7 +616,10 @@ fn execute(
     };
 
     let mut request = format!("{method} {path} HTTP/1.1\r\n");
-    request.push_str(&format!("Host: {host}\r\n"));
+    match url.port() {
+        Some(p) => request.push_str(&format!("Host: {host}:{p}\r\n")),
+        None => request.push_str(&format!("Host: {host}\r\n")),
+    }
     request.push_str("Connection: close\r\n");
     request.push_str("User-Agent: tpt-streamforge\r\n");
     let has_content_type = extra_headers
@@ -523,13 +649,17 @@ fn execute(
     let (status, headers) = parse_status_and_headers(&mut reader)
         .map_err(|e| Error::Transport(format!("read response: {e}")))?;
 
-    let content_length = headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.trim().parse::<u64>().ok());
+    let content_length = parse_content_length(&headers)
+        .map_err(|e| Error::Transport(format!("read response: {e}")))?;
     let chunked = headers.iter().any(|(k, v)| {
         k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
     });
+    if chunked && content_length.is_some() {
+        // Request-smuggling shape: the two framing headers disagree by design.
+        return Err(Error::Transport(
+            "read response: both Content-Length and Transfer-Encoding present".into(),
+        ));
+    }
 
     let body_inner = if method == "HEAD" {
         BodyInner::Empty
@@ -556,7 +686,12 @@ fn parse_status_and_headers(
     reader: &mut BufReader<Conn>,
 ) -> io::Result<(u16, Vec<(String, String)>)> {
     let mut status_line = String::new();
-    reader.read_line(&mut status_line)?;
+    if read_line_limited(reader, &mut status_line)? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "connection closed before a status line",
+        ));
+    }
     let mut parts = status_line.trim().splitn(3, ' ');
     let _version = parts.next();
     let status: u16 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| {
@@ -568,15 +703,63 @@ fn parse_status_and_headers(
     let mut headers = Vec::new();
     loop {
         let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
+        let n = read_line_limited(reader, &mut line)?;
         if n == 0 || line.trim().is_empty() {
             break;
+        }
+        if headers.len() >= MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("more than {MAX_HEADERS} response headers"),
+            ));
         }
         if let Some((k, v)) = line.split_once(':') {
             headers.push((k.trim().to_string(), v.trim().to_string()));
         }
     }
     Ok((status, headers))
+}
+
+/// A chunk-size line's hex value. Strictly hex digits: `u64::from_str_radix`
+/// would also accept a leading `+`, which no conforming server sends.
+fn parse_chunk_size(s: &str) -> Option<u64> {
+    if s.is_empty() || s.len() > 16 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(s, 16).ok()
+}
+
+/// The single, unambiguous `Content-Length`, if any. An unparseable value or
+/// several differing values are errors, not "fall back to read until EOF".
+fn parse_content_length(headers: &[(String, String)]) -> io::Result<Option<u64>> {
+    let mut found: Option<u64> = None;
+    for (_, v) in headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+    {
+        let v = v.trim();
+        let n = if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+            v.parse::<u64>().ok()
+        } else {
+            None
+        }
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bad Content-Length {v:?}"),
+            )
+        })?;
+        match found {
+            Some(prev) if prev != n => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "conflicting Content-Length headers",
+                ))
+            }
+            _ => found = Some(n),
+        }
+    }
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -646,5 +829,130 @@ mod tests {
     fn attempts_of_zero_is_clamped_to_one() {
         let policy = RetryPolicy::new(0, Duration::ZERO, Duration::ZERO);
         assert_eq!(policy.attempts, 1, "0 attempts must still try once");
+    }
+    // --- Hostile-peer hardening ---------------------------------------------
+
+    /// One-shot loopback server: reads the request, writes `reply`, closes.
+    fn serve_once(reply: Vec<u8>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(&reply);
+            }
+        });
+        format!("http://127.0.0.1:{}/x", addr.port())
+    }
+
+    fn get_body(reply: &[u8]) -> Result<Vec<u8>, String> {
+        let url = serve_once(reply.to_vec());
+        let resp = Agent::new().get(&url).call().map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        resp.into_reader()
+            .read_to_end(&mut out)
+            .map_err(|e| e.to_string())?;
+        Ok(out)
+    }
+
+    #[test]
+    fn complete_fixed_body_is_read() {
+        let body = get_body(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").unwrap();
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn truncated_fixed_body_is_an_error() {
+        let err = get_body(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello").unwrap_err();
+        assert!(err.contains("early"), "{err}");
+    }
+
+    #[test]
+    fn truncated_chunked_body_is_an_error() {
+        // Terminating 0-chunk never arrives.
+        assert!(
+            get_body(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn chunked_body_roundtrips() {
+        let body = get_body(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn chunk_size_parsing_is_strict() {
+        assert_eq!(parse_chunk_size("0"), Some(0));
+        assert_eq!(parse_chunk_size("1aF"), Some(0x1af));
+        for bad in ["", "+5", "-5", "0x5", "5 ", "zz", "12345678901234567"] {
+            assert_eq!(parse_chunk_size(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn bad_or_conflicting_framing_is_rejected() {
+        assert!(get_body(b"HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\nx").is_err());
+        assert!(
+            get_body(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nxx")
+                .is_err()
+        );
+        assert!(get_body(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn oversized_header_line_is_rejected() {
+        let mut reply = b"HTTP/1.1 200 OK\r\nX-Big: ".to_vec();
+        reply.extend(std::iter::repeat(b'a').take(20_000));
+        reply.extend_from_slice(b"\r\n\r\n");
+        assert!(get_body(&reply).is_err());
+    }
+
+    #[test]
+    fn too_many_headers_is_rejected() {
+        let mut reply = b"HTTP/1.1 200 OK\r\n".to_vec();
+        for i in 0..(MAX_HEADERS + 10) {
+            reply.extend_from_slice(format!("X-{i}: v\r\n").as_bytes());
+        }
+        reply.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+        assert!(get_body(&reply).is_err());
+    }
+
+    #[test]
+    fn plaintext_http_to_public_host_is_refused() {
+        let err = Agent::new()
+            .get("http://example.com/secret?X-Amz-Signature=abc")
+            .call()
+            .err()
+            .expect("request must be rejected")
+            .to_string();
+        assert!(err.contains("plaintext"), "{err}");
+        assert!(!err.contains("abc"), "query must not leak: {err}");
+    }
+
+    #[test]
+    fn crlf_in_header_is_rejected() {
+        let err = Agent::new()
+            .get("http://127.0.0.1:1/")
+            .set("X-A", "v\r\nInjected: 1")
+            .call()
+            .err()
+            .expect("request must be rejected")
+            .to_string();
+        assert!(err.contains("invalid header"), "{err}");
+    }
+
+    #[test]
+    fn redact_url_drops_query_and_userinfo() {
+        let r = redact_url("https://user:pw@bucket.s3.example.com/key?X-Amz-Signature=sig");
+        assert_eq!(r, "https://bucket.s3.example.com/key?<redacted>");
     }
 }

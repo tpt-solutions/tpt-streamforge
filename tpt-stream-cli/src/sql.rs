@@ -190,12 +190,30 @@ enum ProjectionItem {
 
 const CMP_OPS: &[&str] = &["=", "==", "<>", "!=", "<", "<=", ">", ">="];
 
+/// Deepest nesting of parentheses / unary operators / NOT. Bounds recursion so
+/// a hostile query cannot overflow the stack while parsing or dropping the AST.
+const MAX_DEPTH: usize = 64;
+/// Most tokens in one statement (also bounds left-deep `a AND b AND ...` chains).
+const MAX_TOKENS: usize = 4096;
+
 struct SqlParser {
     tokens: Vec<Tok>,
     pos: usize,
+    depth: usize,
 }
 
 impl SqlParser {
+    /// Run `f` one nesting level deeper, failing past `MAX_DEPTH`.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth >= MAX_DEPTH {
+            bail!("expression is nested more than {MAX_DEPTH} levels deep");
+        }
+        self.depth += 1;
+        let out = f(self);
+        self.depth -= 1;
+        out
+    }
+
     fn peek(&self) -> Option<&Tok> {
         self.tokens.get(self.pos)
     }
@@ -256,8 +274,9 @@ impl SqlParser {
             bail!("CTEs (WITH) are not supported");
         }
         self.expect_keyword("SELECT")?;
-        if self.peek_keyword("DISTINCT") {
-            bail!("SELECT DISTINCT is not supported");
+        let distinct = self.peek_keyword("DISTINCT");
+        if distinct {
+            self.advance();
         }
         let projection = self.parse_projection_list()?;
         self.expect_keyword("FROM")
@@ -304,6 +323,13 @@ impl SqlParser {
 
         let mut pipeline = Pipeline::new();
 
+        // Columns `SELECT DISTINCT` collapses on. Empty means "the whole row",
+        // which is what `SELECT DISTINCT *` needs and what `Deduplicate` takes
+        // an empty key list to mean. Filled in by whichever projection branch
+        // runs, then deduplicated after the projection so the dedup sees the
+        // *output* columns, not the input ones.
+        let distinct_keys: Vec<String>;
+
         if let Some(expr) = &selection {
             let text = convert_expr(expr)?;
             pipeline.filter_expr(&text);
@@ -334,6 +360,7 @@ impl SqlParser {
                 let refs: Vec<&str> = group_by.iter().map(|s| s.as_str()).collect();
                 pipeline.select(&refs);
                 pipeline.dedup(&refs);
+                distinct_keys = group_by.clone();
             } else {
                 let group_refs: Vec<&str> = group_by.iter().map(|s| s.as_str()).collect();
                 pipeline.aggregate(&group_refs, &aggs);
@@ -344,6 +371,7 @@ impl SqlParser {
                     .map(|(generated, alias)| (alias.as_str(), generated.as_str()))
                     .collect();
                 pipeline.map_expr(&pairs);
+                distinct_keys = agg_outputs.iter().map(|(_, alias)| alias.clone()).collect();
             }
         } else {
             // Plain projection: a final map of (output column, expression).
@@ -379,6 +407,8 @@ impl SqlParser {
                         .collect();
                     pipeline.map_expr(&pairs);
                 }
+                // `*` keeps every column, so DISTINCT has to compare whole rows.
+                distinct_keys = Vec::new();
             } else {
                 let mut needed = needed;
                 needed.sort();
@@ -390,7 +420,18 @@ impl SqlParser {
                     .map(|(to, from)| (to.as_str(), from.as_str()))
                     .collect();
                 pipeline.map_expr(&pairs);
+                distinct_keys = final_map.iter().map(|(to, _)| to.clone()).collect();
             }
+        }
+
+        // After the projection, so the keys are the output columns. Dedup keeps
+        // the first row per key, so the surviving rows stay in input order and a
+        // following ORDER BY still sees every distinct value.
+        if distinct && !(aggregate_query && !group_by.is_empty()) {
+            // GROUP BY already collapsed on its keys, and re-deduping on top of
+            // it would be a no-op that costs another pass.
+            let keys: Vec<&str> = distinct_keys.iter().map(|s| s.as_str()).collect();
+            pipeline.dedup(&keys);
         }
 
         apply_order(&mut pipeline, &order_by)?;
@@ -485,6 +526,10 @@ impl SqlParser {
     }
 
     fn parse_or(&mut self) -> Result<Expr> {
+        self.nested(Self::parse_or_inner)
+    }
+
+    fn parse_or_inner(&mut self) -> Result<Expr> {
         let mut left = self.parse_and()?;
         while self.peek_keyword("OR") {
             self.advance();
@@ -505,6 +550,10 @@ impl SqlParser {
     }
 
     fn parse_not(&mut self) -> Result<Expr> {
+        self.nested(Self::parse_not_inner)
+    }
+
+    fn parse_not_inner(&mut self) -> Result<Expr> {
         if self.peek_keyword("NOT") {
             self.advance();
             let inner = self.parse_not()?;
@@ -597,6 +646,10 @@ impl SqlParser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr> {
+        self.nested(Self::parse_unary_inner)
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr> {
         if self.peek_op("-") {
             self.advance();
             let inner = self.parse_unary()?;
@@ -654,7 +707,14 @@ impl SqlParser {
 /// Lower a SQL query to a pipeline.
 pub fn build_sql_pipeline(sql: &str) -> Result<Pipeline> {
     let tokens = lex(sql).context("parsing SQL")?;
-    let mut parser = SqlParser { tokens, pos: 0 };
+    if tokens.len() > MAX_TOKENS {
+        bail!("SQL statement has more than {MAX_TOKENS} tokens");
+    }
+    let mut parser = SqlParser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     parser.parse_pipeline()
 }
 

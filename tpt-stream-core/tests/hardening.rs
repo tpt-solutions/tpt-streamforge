@@ -94,6 +94,36 @@ fn quarantine_policy_captures_ragged_rows() {
 }
 
 #[test]
+fn csv_quarantine_with_unwritable_path_is_an_error_not_silent_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("ragged.csv");
+    let out = dir.path().join("out.csv");
+    // A directory that does not exist: File::create must fail.
+    let bad = dir.path().join("no-such-dir").join("bad.csv");
+    write(
+        &src,
+        "a,b
+1,x
+2,too,many
+3,z
+",
+    );
+
+    let rt = runtime();
+    let result = rt.block_on(async {
+        let mut p = Pipeline::new();
+        p.on_error(ErrorPolicy::Quarantine(bad.to_string_lossy().into()))
+            .read_csv(src.to_string_lossy())
+            .write_csv(out.to_string_lossy());
+        p.execute().await
+    });
+    assert!(
+        result.is_err(),
+        "unwritable quarantine path must fail the run"
+    );
+}
+
+#[test]
 fn jsonl_skip_policy_drops_bad_lines() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("in.jsonl");

@@ -256,3 +256,41 @@ async fn run_reports_missing_files_clearly() {
         .unwrap_err();
     assert!(err.to_string().contains("reading pipeline file"), "{err}");
 }
+
+#[tokio::test]
+async fn limit_stage_keeps_only_the_first_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_csv = dir.path().join("in.csv");
+    let out_csv = dir.path().join("out.csv");
+    write(&in_csv, "a\n1\n2\n3\n4\n5\n");
+    let toml = format!(
+        "[source.csv]\npath = \"{}\"\n\n[[stages]]\nlimit = 2\n\n[sink.csv]\npath = \"{}\"\n",
+        toml_path(&in_csv),
+        toml_path(&out_csv)
+    );
+    let pipeline_file = dir.path().join("pipeline.toml");
+    write(&pipeline_file, &toml);
+    run_command_default(&pipeline_file, true).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&out_csv).unwrap(), "a\n1\n2\n");
+}
+
+#[tokio::test]
+async fn dead_letter_key_creates_the_queue_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_csv = dir.path().join("in.csv");
+    let out_csv = dir.path().join("out.csv");
+    let dlq = dir.path().join("rejected.csv");
+    write(&in_csv, "a\n1\n2\n");
+    let toml = format!(
+        "dead_letter = \"{}\"\n\n[source.csv]\npath = \"{}\"\n\n[[stages]]\nfilter = \"a > 0\"\n\n[sink.csv]\npath = \"{}\"\n",
+        toml_path(&dlq),
+        toml_path(&in_csv),
+        toml_path(&out_csv)
+    );
+    let pipeline_file = dir.path().join("pipeline.toml");
+    write(&pipeline_file, &toml);
+    run_command_default(&pipeline_file, true).await.unwrap();
+    // Nothing failed, so the queue exists but is empty.
+    assert_eq!(std::fs::read_to_string(&dlq).unwrap(), "");
+    assert_eq!(std::fs::read_to_string(&out_csv).unwrap(), "a\n1\n2\n");
+}

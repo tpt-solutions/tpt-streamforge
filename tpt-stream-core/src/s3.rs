@@ -44,11 +44,22 @@ const SIGN_TTL: Duration = Duration::from_secs(3600);
 
 /// Static or session credentials for an S3-compatible endpoint (also used
 /// for Google Cloud Storage's S3-compatible XML API).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CloudCredentials {
     pub access_key: String,
     pub secret_key: String,
     pub session_token: Option<String>,
+}
+
+// Manual `Debug` so `{:?}`, panics, and `unwrap()` messages never print secrets.
+impl std::fmt::Debug for CloudCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloudCredentials")
+            .field("access_key", &self.access_key)
+            .field("secret_key", &"***")
+            .field("session_token", &self.session_token.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 impl CloudCredentials {
@@ -328,13 +339,7 @@ impl S3Store {
 fn http_error(op: &str, key: &str, err: crate::httpclient::Error) -> Error {
     match err {
         crate::httpclient::Error::Status(code, response) => {
-            let reason = response
-                .into_string()
-                .map(|body| {
-                    let snippet: String = body.chars().take(200).collect();
-                    format!("status {code}: {snippet}")
-                })
-                .unwrap_or_else(|_| format!("status {code}"));
+            let reason = format!("status {code}: {}", response.error_snippet());
             Error::Cloud(format!("{op} {key:?}: {reason}"))
         }
         crate::httpclient::Error::Transport(t) => {
@@ -565,6 +570,17 @@ impl crate::sink::Sink for S3Sink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_debug_redacts_secrets() {
+        let c = CloudCredentials::with_session_token("AKIDEXAMPLE", "topsecret", "tok123");
+        let shown = format!("{c:?}");
+        assert!(shown.contains("AKIDEXAMPLE"));
+        assert!(
+            !shown.contains("topsecret") && !shown.contains("tok123"),
+            "{shown}"
+        );
+    }
 
     #[test]
     fn bucket_url_parsing_both_styles() {

@@ -1,6 +1,8 @@
 """Tests for the expanded Python bindings: new sources/sinks, join, error
 policies, expect checks, preview/explain/collect, and pandas export."""
 
+import importlib.resources
+
 import pytest
 
 from tpt_streamforge import Pipeline, TptError
@@ -227,3 +229,94 @@ def test_to_pandas(tmp_path):
     assert list(frame.columns) == ["id", "name", "amount"]
     assert len(frame) == 3
     assert frame["amount"].tolist() == [10, 20, 30]
+
+
+def test_limit_keeps_the_first_rows(tmp_path):
+    src = tmp_path / "in.csv"
+    out = tmp_path / "out.csv"
+    write_text(src, CSV)
+
+    p = Pipeline().read_csv(str(src)).limit(2)
+    stats = p.write_csv(str(out)).execute()
+    # `rows` counts what the source produced; the limit decides what lands.
+    assert stats["rows"] == 3
+    assert out.read_text(encoding="utf-8") == "id,name,amount\n1,alice,10\n2,bob,20\n"
+    assert [s for s in p.stage_stats() if s["name"] == "limit"][0]["rows_out"] == 2
+
+
+def test_dead_letter_file_is_created(tmp_path):
+    src = tmp_path / "in.csv"
+    dlq = tmp_path / "rejected.csv"
+    write_text(src, CSV)
+
+    p = Pipeline().read_csv(str(src)).dead_letter(str(dlq))
+    assert p.dead_letter_rows() == 0
+    p.filter("amount > 0").write_csv(str(tmp_path / "out.csv")).execute()
+    # Nothing failed, so the queue exists but stayed empty.
+    assert dlq.read_text(encoding="utf-8") == ""
+
+
+def test_dead_letter_rejects_an_unwritable_path(tmp_path):
+    src = tmp_path / "in.csv"
+    write_text(src, CSV)
+    with pytest.raises(TptError):
+        Pipeline().read_csv(str(src)).dead_letter(str(tmp_path / "no" / "such" / "q.csv"))
+
+
+def test_count_all_names_the_output_column_after_the_key(tmp_path):
+    """`agg`'s dict key doubles as the output name for `count_all`.
+
+    That differs from the CLI/WASM bindings, which always emit `count_all`; the
+    READMEs document the difference, and this test pins the Python behavior.
+    """
+    src = tmp_path / "in.csv"
+    write_text(src, "k,v\na,1\na,2\nb,3\n")
+
+    # A fresh key keeps the grouping column and adds a row count.
+    rows = (
+        Pipeline()
+        .read_csv(str(src))
+        .group_by(["k"])
+        .agg({"n": "count_all"})
+        .sort(["k"])
+        .collect()
+    )
+    assert rows == [{"k": "a", "n": 2}, {"k": "b", "n": 1}]
+
+
+def test_with_retry_is_chainable_and_optional(tmp_path):
+    src = tmp_path / "in.csv"
+    out = tmp_path / "out.csv"
+    write_text(src, CSV)
+
+    # with_retry only affects the next network source/sink; a local CSV run
+    # must be unaffected.
+    stats = (
+        Pipeline()
+        .with_retry(3, base_delay_ms=1, max_delay_ms=5)
+        .read_csv(str(src))
+        .write_csv(str(out))
+        .execute()
+    )
+    assert stats["rows"] == 3
+    assert out.read_text(encoding="utf-8") == CSV
+
+
+def test_shipped_type_stub_matches_the_runtime_api():
+    """`_native.pyi` must exist and mention every public builder method."""
+    import tpt_streamforge
+
+    stub = (importlib.resources.files(tpt_streamforge) / "_native.pyi").read_text()
+    for name in [
+        "read_csv", "write_csv", "filter", "map", "select", "sort", "dedup",
+        "join_csv", "group_by", "limit", "dead_letter", "dead_letter_rows",
+        "with_retry", "expect", "on_error", "on_progress", "execute",
+        "collect", "to_pandas", "preview", "explain", "stage_stats",
+        "read_s3", "write_s3", "read_gcs", "write_gcs", "read_azure",
+        "write_azure", "read_postgres", "write_postgres", "read_sqlite",
+        "write_sqlite", "read_jsonl", "write_jsonl", "read_json", "write_json",
+        "read_columnar", "write_columnar", "read_http",
+    ]:
+        assert f"def {name}(" in stub, f"{name} missing from _native.pyi"
+    # PEP 561 marker must ship alongside it.
+    assert (importlib.resources.files(tpt_streamforge) / "py.typed").is_file()

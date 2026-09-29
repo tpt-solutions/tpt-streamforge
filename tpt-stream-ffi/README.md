@@ -8,39 +8,61 @@ C ABI over the [tpt-stream-core](../tpt-stream-core) engine. Builds as a
 Dual-licensed MIT / Apache-2.0. The `cbindgen` build tool (MPL-2.0) never
 ships in any artifact.
 
-## Opaque handles
+## Handles and errors
 
-- `tpt_pipeline_t` — a pipeline under construction (source → stages → sink)
-- `tpt_record_batch_t` — one columnar batch of results
+Handles are opaque `void *`:
 
-Every function returns an `int` error code (`TPT_OK`, `TPT_ERR_INVALID_ARG`,
-`TPT_ERR_IO`, `TPT_ERR_CSV`, `TPT_ERR_JSON`, `TPT_ERR_SCHEMA`,
-`TPT_ERR_EXEC`, ...); failure details are retrievable with
-`tpt_last_error_message()`.
+- a **pipeline** — created by `tpt_pipeline_new`, released by `tpt_pipeline_free`
+- a **record batch** — created by `tpt_record_batch_read`, released by
+  `tpt_record_batch_free`
 
-## Pipeline lifecycle
+The two kinds are not distinguishable at the type level, so passing a batch to
+a pipeline function (or the reverse) is undefined behaviour. Freeing a handle
+twice is also undefined behaviour. A handle must not be used from two threads
+at once; distinct handles are independent.
+
+Every fallible function returns an `int` status: `TPT_OK`, `TPT_ERR_INVALID_ARG`,
+`TPT_ERR_IO`, `TPT_ERR_CSV`, `TPT_ERR_JSON`, `TPT_ERR_SCHEMA`, `TPT_ERR_EXEC`,
+`TPT_ERR_NOMEM`, `TPT_ERR_NO_SOURCE`, `TPT_ERR_PANIC`. After a failure,
+`tpt_error_string(buf, cap, &written)` copies the message for the calling
+thread, and `tpt_last_error_code()` returns the failing status code.
+Panics never cross the boundary; they surface as `TPT_ERR_PANIC`.
+
+## Building a pipeline
 
 ```c
-tpt_pipeline_t *p = tpt_pipeline_new();
-tpt_pipeline_read_csv(p, "in.csv");
-tpt_pipeline_filter_expr(p, "amount > 0");
+void *p = NULL;
+tpt_pipeline_new(&p);
+tpt_pipeline_read_csv(p, "in.csv", 0);        /* 0 = default chunk size */
+tpt_pipeline_filter(p, "amount > 0");
 tpt_pipeline_write_csv(p, "out.csv");
-tpt_pipeline_execute(p);              /* blocking; call from your own thread */
+
+uint64_t rows = 0;
+int rc = tpt_pipeline_execute(p, &rows);      /* blocking; call from your own thread */
+if (rc != TPT_OK) {
+    char msg[256];
+    tpt_error_string(msg, sizeof msg, NULL);
+    fprintf(stderr, "failed (%d): %s
+", rc, msg);
+}
 tpt_pipeline_free(p);
 ```
 
-Stage builders mirror the Rust/Python APIs: `tpt_pipeline_filter` (closure
-free variants), `tpt_pipeline_filter_expr`, `tpt_pipeline_map_expr`,
-`tpt_pipeline_select`, `tpt_pipeline_aggregate`, `tpt_pipeline_sort_by`,
-`tpt_pipeline_dedup`, plus SQLite/PostgreSQL sources and sinks.
+The C ABI covers a deliberately small surface: `tpt_pipeline_read_csv`,
+`tpt_pipeline_filter`, `tpt_pipeline_map`, `tpt_pipeline_aggregate`,
+`tpt_pipeline_sort`, `tpt_pipeline_write_csv`, `tpt_pipeline_execute`. Joins,
+`select`, dedup, JSONL, databases and cloud storage are available from Rust,
+Python and the `tptforge` CLI but are **not** exposed here.
 
-## Reading results
+## Reading `.tptcol` results
 
-After `tpt_pipeline_execute`, pull batches with
-`tpt_pipeline_next_batch(p, &batch)` and inspect them via
+`tpt_record_batch_read(path, &batch)` loads the first batch of a `.tptcol`
+file (for example one written by a columnar sink). Inspect it with
 `tpt_record_batch_num_rows`, `tpt_record_batch_num_columns`,
-`tpt_record_batch_column_name`, `tpt_record_batch_cell_as_str` (every cell
-renders as text; nulls as `""`), then `tpt_record_batch_free`.
+`tpt_record_batch_get_column` (name and type code) and
+`tpt_record_batch_get_cell` (every cell renders as text; nulls as `""`), then
+release it with `tpt_record_batch_free`. Batches read from untrusted files are
+size-checked: a corrupt header yields an error status, not an over-allocation.
 
 ## Building
 

@@ -45,6 +45,7 @@ pub const TPT_AGG_MAX: u8 = 5;
 
 thread_local! {
     static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static LAST_CODE: std::cell::Cell<c_int> = const { std::cell::Cell::new(TPT_OK) };
 }
 
 fn set_error(msg: impl Into<String>) {
@@ -69,7 +70,9 @@ fn error_code(err: &tpt_stream_core::Error) -> c_int {
 
 fn failure(err: &tpt_stream_core::Error) -> c_int {
     set_error(err.to_string());
-    error_code(err)
+    let code = error_code(err);
+    LAST_CODE.with(|c| c.set(code));
+    code
 }
 
 /// Copy `src` into a caller buffer as NUL-terminated UTF-8.
@@ -81,7 +84,11 @@ fn write_cstring(buf: *mut c_char, cap: usize, written: *mut usize, src: &str) -
     unsafe {
         let dst = std::slice::from_raw_parts_mut(buf.cast::<u8>(), cap);
         let bytes = src.as_bytes();
-        let n = bytes.len().min(cap - 1);
+        let mut n = bytes.len().min(cap - 1);
+        // Never cut a multi-byte UTF-8 sequence in half.
+        while n > 0 && !src.is_char_boundary(n) {
+            n -= 1;
+        }
         dst[..n].copy_from_slice(&bytes[..n]);
         dst[n] = 0;
         if !written.is_null() {
@@ -129,10 +136,11 @@ pub unsafe extern "C" fn tpt_error_string(
     .unwrap_or(TPT_ERR_PANIC)
 }
 
-/// Return the last error status code without clearing it.
+/// Return the status code of the last failed call on this thread (`TPT_OK` if
+/// none has failed) without clearing it.
 #[no_mangle]
 pub extern "C" fn tpt_last_error_code() -> c_int {
-    TPT_OK
+    LAST_CODE.with(std::cell::Cell::get)
 }
 
 // ---------------------------------------------------------------------------
@@ -166,8 +174,11 @@ pub unsafe extern "C" fn tpt_pipeline_free(pipeline: *mut c_void) {
     if pipeline.is_null() {
         return;
     }
-    // SAFETY: caller passes a handle from `tpt_pipeline_new` (or NULL).
-    drop(unsafe { Box::from_raw(pipeline.cast::<tpt_stream_core::Pipeline>()) });
+    // A panic in `Drop` must not unwind across the C boundary.
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: caller passes a handle from `tpt_pipeline_new` (or NULL).
+        drop(unsafe { Box::from_raw(pipeline.cast::<tpt_stream_core::Pipeline>()) });
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +312,10 @@ pub unsafe extern "C" fn tpt_pipeline_aggregate(
         let Some(handle) = handle else {
             return TPT_ERR_INVALID_ARG;
         };
+        // A non-zero count with a NULL array would dereference NULL below.
+        if (group_n > 0 && group_by.is_null()) || (spec_n > 0 && specs.is_null()) {
+            return TPT_ERR_INVALID_ARG;
+        }
         let mut keys: Vec<String> = Vec::with_capacity(group_n);
         for i in 0..group_n {
             // SAFETY: caller guarantees valid strings.
@@ -514,8 +529,11 @@ pub unsafe extern "C" fn tpt_record_batch_free(batch: *mut c_void) {
     if batch.is_null() {
         return;
     }
-    // SAFETY: caller passes a handle from `tpt_record_batch_read` (or NULL).
-    drop(unsafe { Box::from_raw(batch.cast::<tpt_stream_core::RecordBatch>()) });
+    // A panic in `Drop` must not unwind across the C boundary.
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: caller passes a handle from `tpt_record_batch_read` (or NULL).
+        drop(unsafe { Box::from_raw(batch.cast::<tpt_stream_core::RecordBatch>()) });
+    }));
 }
 
 /// Number of rows in a batch handle.
@@ -524,8 +542,11 @@ pub unsafe extern "C" fn tpt_record_batch_free(batch: *mut c_void) {
 /// `batch` must be a batch handle or NULL (returns 0).
 #[no_mangle]
 pub unsafe extern "C" fn tpt_record_batch_num_rows(batch: *const c_void) -> u64 {
-    let batch = unsafe { batch.cast::<tpt_stream_core::RecordBatch>().as_ref() };
-    batch.map(|b| b.num_rows() as u64).unwrap_or(0)
+    catch_unwind(AssertUnwindSafe(|| {
+        let batch = unsafe { batch.cast::<tpt_stream_core::RecordBatch>().as_ref() };
+        batch.map(|b| b.num_rows() as u64).unwrap_or(0)
+    }))
+    .unwrap_or(0)
 }
 
 /// Number of columns in a batch handle.
@@ -534,8 +555,11 @@ pub unsafe extern "C" fn tpt_record_batch_num_rows(batch: *const c_void) -> u64 
 /// `batch` must be a batch handle or NULL (returns 0).
 #[no_mangle]
 pub unsafe extern "C" fn tpt_record_batch_num_columns(batch: *const c_void) -> u64 {
-    let batch = unsafe { batch.cast::<tpt_stream_core::RecordBatch>().as_ref() };
-    batch.map(|b| b.num_columns() as u64).unwrap_or(0)
+    catch_unwind(AssertUnwindSafe(|| {
+        let batch = unsafe { batch.cast::<tpt_stream_core::RecordBatch>().as_ref() };
+        batch.map(|b| b.num_columns() as u64).unwrap_or(0)
+    }))
+    .unwrap_or(0)
 }
 
 /// Write column `column`'s name into `buffer` (NUL-terminated). On success
@@ -804,5 +828,44 @@ mod tests {
             ""
         );
         unsafe { tpt_record_batch_free(bh) };
+    }
+    #[test]
+    fn aggregate_null_arrays_are_invalid_args_not_crashes() {
+        let p = pipe();
+        unsafe {
+            assert_eq!(
+                tpt_pipeline_aggregate(p, std::ptr::null(), 2, std::ptr::null(), 0),
+                TPT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                tpt_pipeline_aggregate(p, std::ptr::null(), 0, std::ptr::null(), 3),
+                TPT_ERR_INVALID_ARG
+            );
+            tpt_pipeline_free(p);
+        }
+    }
+
+    #[test]
+    fn cstring_truncation_respects_utf8_boundaries() {
+        let mut buf = [0 as c_char; 5];
+        // "héllo": 'é' is 2 bytes at offsets 1..3; capacity 5 holds 4 bytes.
+        let rc = write_cstring(buf.as_mut_ptr(), buf.len(), std::ptr::null_mut(), "aébé");
+        assert_eq!(rc, TPT_ERR_NOMEM);
+        let bytes: Vec<u8> = buf
+            .iter()
+            .take_while(|b| **b != 0)
+            .map(|b| *b as u8)
+            .collect();
+        assert!(std::str::from_utf8(&bytes).is_ok(), "{bytes:?}");
+    }
+
+    #[test]
+    fn last_error_code_tracks_failures() {
+        let p = pipe();
+        unsafe {
+            let rc = tpt_pipeline_execute(p, std::ptr::null_mut());
+            assert_ne!(rc, TPT_OK);
+            tpt_pipeline_free(p);
+        }
     }
 }

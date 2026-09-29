@@ -1,7 +1,9 @@
 # Design Specification: `tpt-streamforge`
 
-**Status:** Draft / RFC  
-**Project:** `tpt-streamforge` (The Zero-Copy Streaming ETL Engine)  
+**Status:** Implemented (this file is the original design RFC, kept as the decision
+  record; where the shipped API differs, the section says so inline and the
+  per-crate README.md/CHANGELOG.md are authoritative)
+**Project:** `tpt-streamforge` (The Narrow-Streaming ETL Engine)  
 **Ecosystem:** TPT Solutions  
 **License:** Dual-licensed MIT / Apache-2.0  
 **Date:** September 2026  
@@ -17,7 +19,7 @@ Currently, data engineers and backend developers face a painful choice when proc
 - **Node.js Streams:** Memory-efficient but painfully slow for complex transformations.
 - **Polars/DuckDB:** Excellent for analytics, but carry heavy dependency trees and copyleft licensing risks.
 
-`tpt-streamforge` solves this by providing a streaming pipeline engine that processes files in fixed-size chunks, keeping memory usage constant regardless of file size. It uses a custom, minimal columnar data format (inspired by Arrow but implemented from scratch) to enable zero-copy data exchange with Python and JavaScript.
+`tpt-streamforge` solves this by providing a streaming pipeline engine that processes files in fixed-size chunks, keeping memory usage constant regardless of file size. It uses a custom, minimal columnar data format (inspired by Arrow but implemented from scratch) as the in-process batch type, plus a `.tptcol` file format for spill and interchange.
 
 **Key differentiator:** We reject heavy, complex dependencies (like `parquet`, `wasmtime`) even if they're permissively licensed. If a good, minimal alternative doesn't exist, we build our own replacement.
 
@@ -25,8 +27,8 @@ Currently, data engineers and backend developers face a painful choice when proc
 
 1. **Strict MIT / Apache-2.0 Licensing:** All code is dual-licensed MIT / Apache-2.0. All dependencies are audited via `cargo-deny`. Any dependency (direct or transitive) carrying a copyleft license (GPL, LGPL, AGPL, SSPL, MPL with copyleft provisions) is strictly rejected.
 2. **Minimal Dependency Tree:** We avoid heavy, complex dependencies (e.g., `parquet`, `wasmtime`). If a good, minimal alternative doesn't exist, we build our own replacement. The goal is to keep the dependency tree small, auditable, and free of licensing ambiguity.
-3. **Constant Memory Footprint:** Memory usage is bounded by the chunk size (default 64MB), not the file size. A 500GB CSV can be processed on a laptop with 8GB RAM.
-4. **Zero-Copy Data Exchange:** Uses a custom columnar data format (inspired by Arrow IPC) to share memory between Rust, Python, and JavaScript without serialization overhead.
+3. **Constant Memory Footprint:** Memory usage is bounded by the chunk size (default 65,536 rows per batch), not the file size. A 500GB CSV can be processed on a laptop with 8GB RAM.
+4. **One Columnar Batch Type Everywhere:** A custom columnar `RecordBatch` is the currency between source, stages, and sink, and is also the `.tptcol` spill/interchange format. Bindings receive plain Python/JS values rather than shared raw pointers — see §5.2, "as shipped".
 5. **Streaming-First, Not Batch-First:** Designed for row-by-row transformations, filters, and aggregations. Not a DataFrame library.
 6. **Rust-Only Extensibility:** Custom transformations are written as Rust closures. No WASM plugin system (to avoid `wasmtime` dependency). Cross-language extensibility is achieved via the FFI boundary, not runtime plugins.
 7. **Multi-Language Native:** Pure Rust core with clean C ABI. Wrappers for Python, JavaScript, and C/C++.
@@ -151,27 +153,41 @@ tpt-streamforge/
       │                    │                    │                    │
       ▼                    ▼                    ▼                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  Custom Columnar RecordBatch (Zero-Copy, Fixed-Size Chunks)                 │
-│  [64 rows × 10 columns] → [64 rows × 10 columns] → ... → [64 rows × 10 cols]│
+│  Custom Columnar RecordBatch (Fixed-Size Batches)                          │
+│  [65,536 rows × 10 cols] → [65,536 rows × 10 cols] → ... → [N rows × 10]  │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 5. Key Components & Implementation Details
 5.1 Streaming Parsers (Sources)
-CSV: Uses csv crate (MIT/Unlicense) with streaming reader.
+CSV: `tpt-csv` — an in-house streaming reader/writer (as shipped; the `csv`
+crate was dropped because it pulled in the Apache-2.0-only `ryu` via
+`csv-core`, and the policy is a pure-MIT-satisfiable dependency chain). It adds
+a columnar (SoA) ingest path and a quote-aware splitter so whole-buffer reads
+can be parsed in parallel.
 JSON/JSONL: Uses serde_json (MIT/Apache-2.0) with streaming deserializer.
 Custom Columnar Format: Native format for intermediate storage (see §5.2).
+Also: SQLite/PostgreSQL SELECT, S3/GCS/Azure objects, and plain HTTP(S) URLs;
+`.gz` inputs decompress on the fly.
 5.2 Custom Columnar Format (tpt-stream-columnar)
 Since we're rejecting arrow and parquet, we need to build our own minimal columnar data format. This is a significant undertaking, but it gives us absolute control over the dependency tree.
 Design Goals:
 Simple: Easier to implement and audit than Arrow/Parquet.
 Efficient: Columnar layout for fast filtering and aggregation.
-Zero-Copy FFI: Can be shared with Python/JS via raw pointers.
-Streaming-Friendly: Fixed-size chunks (default 64MB) for constant memory usage.
-Implementation Plan:
-Phase 1: Build a basic columnar format supporting primitive types (Int32, Int64, Float32, Float64, Utf8).
-Phase 2: Add support for nested types (List, Struct) if needed.
-Phase 3: Implement serialization/deserialization for disk storage.
-Phase 4: Implement zero-copy FFI for Python/JS integration.
+Streaming-Friendly: Fixed-size batches (default 65,536 rows) for constant memory usage.
+Implementation (as shipped):
+Phase 1: Primitive types (Int32, Int64, Float32, Float64, Utf8, Bool), later
+  extended with Date and Timestamp. Done.
+Phase 2: Nested types (List, Struct) — not planned; nothing in the current
+  feature set needs them.
+Phase 3: `.tptcol` serialization for disk spill and interchange (zstd-compressed
+  buffers, feature `zstd`). Done.
+Phase 4: Zero-copy FFI for Python/JS — **not implemented, deliberately**. The
+  bindings are PyO3 and wasm-bindgen, which cannot hand Rust-owned buffers to
+  Python/JS safely without a buffer-ownership protocol, and the only consumer
+  (`to_pandas`) is better served by plain values. `to_arrow()` and the 11
+  `arrow`/`arrow-*` crates were removed for this reason; `to_pandas()` goes
+  through `collect()` + `pandas.DataFrame`. Revisit only as a deliberate
+  decision, not a backlog item.
 Trade-offs:
 Pros: Minimal dependencies, full control, no licensing ambiguity.
 Cons: Significant development effort, less feature-rich than Arrow/Parquet.
@@ -184,56 +200,76 @@ Deduplicate: Remove duplicate rows based on key columns
 Sort: External merge sort for large datasets (uses disk if needed)
 Join: Streaming hash join for two input streams
 5.4 Extensibility (Rust Closures Only)
-Since we're dropping the WASM plugin system, custom transformations are written as Rust closures:
+Since we're dropping the WASM plugin system, custom transformations are written as Rust closures. As shipped, `map` takes the output column names plus a `Row -> Vec<Value>` closure (`Row` owns its values, so the closure cannot borrow from the batch):
 
+```rust
 use tpt_stream_core::pipeline::Pipeline;
+use tpt_stream_core::Value;
 
-let pipeline = Pipeline::new()
+let stats = Pipeline::new()
     .read_csv("input.csv")
-    .map(|row| {
-        row.with_column("full_name", format!("{} {}", row.get("first_name"), row.get("last_name")))
+    .map(&["first_name", "last_name", "full_name"], |row| {
+        let first = row.get("first_name").map(|v| v.to_string()).unwrap_or_default();
+        let last = row.get("last_name").map(|v| v.to_string()).unwrap_or_default();
+        vec![Value::Utf8(first), Value::Utf8(last), Value::Utf8(format!("{first} {last}"))]
     })
-    .write_csv("output.csv");
+    .write_csv("output.csv")
+    .execute()?;
+```
 
-pipeline.execute()?;
+For anything more than a row-wise rewrite, implement `PipelineStage` and pass it
+to `Pipeline::stage`; that is the same trait the built-in sort/join/aggregate
+stages use, so custom stateful stages get spill, telemetry, and dead-letter
+handling for free.
 
 For cross-language extensibility, users can:
 Write custom transformations in Rust and expose them via the FFI boundary.
 Use the Python/JS wrappers to call Rust functions.
 5.5 Sinks (Writers)
-CSV: Streaming writer with configurable delimiters and quoting.
+CSV: Streaming writer. As shipped the delimiter is fixed at `,` with RFC 4180
+  quoting — a configurable delimiter was scoped out, not missed.
 JSON/JSONL: Streaming JSON writer.
 Custom Columnar Format: Native format for intermediate storage.
-Database: Bulk insert into PostgreSQL or SQLite via rusqlite (MIT).
+Database: Bulk insert into PostgreSQL (`tokio-postgres` COPY) or SQLite
+  (`rusqlite`).
+Cloud: S3 (single PUT or multipart), GCS, Azure block blobs; plain HTTP URLs too.
 6. Target API Design (Developer Experience)
 6.1 Python API (via PyO3)
 
-import tpt_streamforge as sf
+from tpt_streamforge import Pipeline
 
-pipeline = (
-    sf.read_csv("massive_data.csv", chunk_size=65536)
-    .filter("age > 18 AND status == 'active'")
-    .map("full_name = first_name + ' ' + last_name")
-    .group_by("department")
-    .agg({"salary": "mean", "age": "max"})
+stats = (
+    Pipeline()
+    .read_csv("massive_data.csv", chunk_size=65536)
+    .filter("age > 18 and status == 'active'")
+    .map({"first_name": "first_name", "last_name": "last_name",
+          "full_name": "first_name + ' ' + last_name"})
+    .group_by(["department"])
+    .agg({"salary": "avg", "age": "max"})
     .write_csv("output.csv")
+    .execute()
 )
 
-pipeline.execute()
+Note the shipped signatures: sources/sinks/stages are methods on `Pipeline`
+(not module-level functions), `group_by` returns a handle you call `.agg()` on,
+expressions are lowercase (`and`, `or`, `not`), and the aggregate fn is `avg`,
+not `mean`.
 
 6.2 JavaScript / Node.js API (via WASM)
 
-import { StreamForge } from 'tpt-streamforge-wasm';
+import { Pipeline } from 'tpt-streamforge-node';   // browser: 'tpt-streamforge-browser'
 
-const forge = new StreamForge();
+const p = new Pipeline(readFileSync('massive_data.csv', 'utf8'))
+  .filter("age > 18 and status == 'active'")
+  .map(['first_name', 'last_name', 'full_name'],
+       ['first_name', 'last_name', "first_name + ' ' + last_name"])
+  .writeFile('output.csv');
 
-const pipeline = forge
-  .readCSV('massive_data.csv')
-  .filter(row => row.age > 18 && row.status === 'active')
-  .map(row => ({ ...row, full_name: `${row.first_name} ${row.last_name}` }))
-  .writeCSV('output.csv');
+const { rows, csv } = p.execute();
 
-await pipeline.execute();
+As shipped the WASM engine is in-memory and file-less (a `Vec<RecordBatch>`);
+the JS wrapper owns the file I/O and the expressions are strings rather than
+closures, because a closure cannot cross the wasm boundary.
 
 7. Performance & Resource Targets
 Metric

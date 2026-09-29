@@ -206,8 +206,8 @@ impl HashJoin {
             });
         }
         let id = self.spill.as_ref().unwrap().id;
-        let path =
-            std::env::temp_dir().join(format!("tpt-streamforge-join-{id}-p{partition}.tptcol"));
+        let path = crate::spill::spill_dir()
+            .join(format!("tpt-streamforge-join-{id}-p{partition}.tptcol"));
         let mut columns: Vec<Column> = self
             .right_schema
             .iter()
@@ -230,7 +230,7 @@ impl HashJoin {
     }
 
     fn spill_path(&self, partition: usize) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+        crate::spill::spill_dir().join(format!(
             "tpt-streamforge-join-{}-p{partition}.tptcol",
             self.spill.as_ref().expect("spill state").id
         ))

@@ -121,6 +121,11 @@ pub struct PipelineSpec {
     pub stages: Vec<StageSpec>,
     #[serde(default)]
     pub error_policy: Option<String>,
+    /// Path of a CSV file that receives rows a *stage* rejects (instead of
+    /// aborting the run). Not supported with stateful stages
+    /// (aggregate/sort/dedup/join/expect).
+    #[serde(default)]
+    pub dead_letter: Option<String>,
     pub sink: Option<SinkSpec>,
 }
 
@@ -228,6 +233,8 @@ pub enum StageSpec {
     Dedup(Vec<String>),
     Join(JoinSpec),
     Expect(ExpectSpec),
+    /// Keep only the first N rows.
+    Limit(u64),
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,6 +335,7 @@ keyed_enum!(StageSpec, "stage", {
     Dedup => "dedup",
     Join => "join",
     Expect => "expect",
+    Limit => "limit",
 });
 
 keyed_enum!(SinkSpec, "sink", {
@@ -352,6 +360,11 @@ pub fn build_pipeline(spec: &PipelineSpec) -> Result<Pipeline> {
     let mut pipeline = Pipeline::new();
     if let Some(policy) = &spec.error_policy {
         pipeline.on_error(parse_error_policy(policy)?);
+    }
+    if let Some(path) = &spec.dead_letter {
+        pipeline
+            .dead_letter(path)
+            .with_context(|| format!("opening dead-letter file {path:?}"))?;
     }
     apply_source(&mut pipeline, &spec.source)?;
     for stage in &spec.stages {
@@ -447,6 +460,9 @@ fn apply_stage(pipeline: &mut Pipeline, stage: &StageSpec) -> Result<()> {
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             pipeline.map_expr(&pairs);
+        }
+        StageSpec::Limit(n) => {
+            pipeline.limit(usize::try_from(*n).context("limit does not fit in usize")?);
         }
         StageSpec::Select(columns) => {
             let refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
@@ -758,6 +774,7 @@ pub async fn run_command(
 
     let result = pipeline.execute().await;
     if let Some((collector, shutdown)) = &metrics {
+        collector.add_dead_letter(pipeline.dead_letter_rows());
         // Report the final totals even on failure, so a scrape after the run
         // still shows what it managed to do.
         if let Ok(stats) = &result {

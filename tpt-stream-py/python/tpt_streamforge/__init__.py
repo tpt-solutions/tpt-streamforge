@@ -17,6 +17,9 @@ Example::
         .write_csv("out.csv")
         .execute()
     )
+
+Type information for the extension module lives in `_native.pyi`; the
+`py.typed` marker tells type checkers to use it.
 """
 
 from ._native import GroupBy, Pipeline, TptError  # noqa: F401

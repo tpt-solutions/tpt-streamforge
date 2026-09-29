@@ -461,3 +461,101 @@ improvement for any consumer, and delete the workaround code in
 - [x] Add `ColumnarReader` unit tests (simple/quoted/ragged rows under
       strict/skip/quarantine; chunk-size bounds; 6 tests in columnar.rs)
 
+---
+
+## Phase 12: Review Follow-ups — Stubs, Security, Adoption (2026-09-29)
+
+Plan: `C:\Users\Phillip\.claude\plans\review-project-fix-any-polished-fog.md`.
+**Dependency rule:** the released project is dual MIT/Apache-2.0, but the
+dependency chain must stay pure-MIT-satisfiable — no Apache-only crates, not
+even opt-in features. Check `cargo deny list` before adding any crate; hand-roll
+with std where a candidate fails.
+
+### 12.1 Stubs, doc drift, loose ends
+- [x] Rewrite `tpt-stream-ffi/README.md` to the real 17-entry-point API; fix
+      root `README.md` claim that Python uses the FFI crate
+- [x] CLI: `dead_letter` TOML key wired to `Pipeline::dead_letter` and the
+      `tptforge_dead_letter_rows` metric (was always 0); CLI `limit` stage
+      (tests written; TOML shape in the two new tests needs fixing to match the
+      `[source.csv] path = ...` form — currently failing)
+- [x] `browser/index.d.ts`: declare `TelemetryEvent`; document that `execute()`
+      is a serialise-only call in both wasm `.d.ts` files
+- [ ] Fix the 2 new CLI tests (`limit_stage_keeps_only_the_first_rows`,
+      `dead_letter_key_creates_the_queue_file`) to use valid TOML source/sink syntax
+- [ ] Python: expose `dead_letter`, `limit`, and `with_retry` (S3/Azure/Postgres)
+- [ ] Python typing: `py.typed` + `_native.pyi` stubs; project URLs/readme in `pyproject.toml`
+- [ ] `tpt-stream-columnar/src/column.rs:72,117,148`: replace public-API `panic!`
+      on type mismatch with `Result`
+- [ ] `tpt-stream-core/src/agg.rs:410,425`: replace internal accumulator-mismatch panics
+- [ ] Repo hygiene: delete `pytest_final.log` and `scripts/_patch_dates3.py`;
+      remove personal path at `todo.md:420`; dedupe `tpt-stream-cli/examples/pipeline.toml`
+- [ ] Refresh `spec.txt` API examples to the shipped API (or mark aspirational;
+      also stale: `csv` crate, zero-copy FFI, configurable CSV delimiters)
+- [ ] Run the ffi `c_integration` test on Windows CI (or document why not)
+- [ ] Verify `count_all` output column naming in Python/WASM READMEs
+- [ ] SQL frontend: `SELECT DISTINCT` (likely user expectation)
+- [ ] Close/move the unchecked Parquet and Window-function items above; tag v0.1.0
+      and replace the `[0.1.0] - placeholder` changelog heading
+
+### 12.2 Security audit fixes (findings F1–F26)
+- [x] F1 `.tptcol` reader: size caps, bounded reads, `checked_*` arithmetic, null
+      bitmap length check, streaming zstd decode with output cap, strict UTF-8
+      (5 regression tests)
+- [x] F3 HTTP client: line/header-count caps, bounded error bodies, truncated
+      fixed/chunked bodies are errors, strict chunk sizes, reject bad/duplicate
+      Content-Length and CL+TE (11 tests)
+- [x] F4 refuse plaintext `http://` to non-loopback hosts
+      (`TPT_ALLOW_INSECURE_HTTP=1` to override)
+- [x] F5 redact URL query strings in logs/errors (`redact_url`)
+- [x] F6 expression/SQL parser depth (64) and token (4096) limits
+- [x] F7 spill files in a private per-process dir (0700, unguessable name)
+- [x] F8 quarantine: fail fast on unwritable path (was silently dropping rows),
+      0600 on Unix
+- [x] F9 redacting `Debug` for `CloudCredentials` / `AzureCredentials`
+- [x] F15 reject CR/LF/NUL in request headers; F17 `Host` header includes port
+- [x] F24 FFI: null-array checks in `tpt_pipeline_aggregate`, `catch_unwind` on
+      free/num_rows/num_columns, UTF-8-safe truncation, real `tpt_last_error_code`
+- [ ] F1 follow-up: cap gzip decompressed output (`source.rs:42-49`, `http.rs:106-110`)
+      and add a `max_body` option to the HTTP client
+- [ ] F14 line/record/field size caps: JSONL `read_line`, JSON-array scanner,
+      `tpt-csv` reader (default 16 MiB, configurable)
+- [ ] F24 follow-up: distinct opaque handle types in the C header
+- [ ] F13 metrics server: cap request line/headers, overall deadline, default to loopback
+- [ ] F11 CI/release: top-level `permissions: contents: read`; scope `NPM_TOKEN`
+      to publish steps; `npm publish --provenance`; pin actions to commit SHAs;
+      replace `curl | sh` wasm-pack; `--locked` builds
+- [ ] F12 Dockerfile: non-root user, pinned image digests, `--locked`; verify `.dockerignore`
+- [ ] F18/F19 percent-encode Azure blob keys; validate GCS bucket names
+- [ ] F20 `PRAGMA query_only=ON` for the SQLite source; reject NUL in identifiers
+- [ ] F22 env-var substitution in pipeline TOML (keep passwords out of files)
+- [ ] F10 TLS: log `load_native_certs` errors, fail clearly on empty root store,
+      optional extra CA bundle path; re-verify `deny.toml` RUSTSEC ignores
+      (`cargo tree -i rustls-webpki@0.102.8`) and add review-by dates.
+      `ring` opt-in is **rejected** (Apache-only)
+- [ ] F2 Postgres TLS: `postgres-tls` feature only if the dependency tree passes
+      the MIT-only check; otherwise hand-roll over the existing rustls setup or
+      refuse non-loopback hosts without TLS
+
+### 12.3 Adoption tooling
+- [ ] `release.yml`: build `tptforge` binaries (Linux/macOS/Windows), attach with
+      SHA256SUMS + build provenance attestation
+- [ ] `[package.metadata.binstall]`, `install.sh` / `install.ps1`, Scoop/Homebrew
+      manifests; document `cargo install tpt-stream-cli`
+- [ ] `cargo audit` on PRs; SBOM
+- [ ] `tptforge completions <shell>` and man page
+- [ ] `.devcontainer/`; cross-platform `just setup` (fix hardcoded `.venv/Scripts`)
+- [ ] `tptforge validate` / `explain` / `--dry-run`; `deny_unknown_fields` on spec
+      structs; TOML line/column, stage index, and did-you-mean in errors
+- [ ] `tptforge schema-json` + checked-in `pipeline.schema.json` (CI freshness
+      test) for editor autocomplete; hand-written, no `schemars`
+- [ ] `tptforge init <file>` (infer schema, commented starter TOML with `expect`
+      checks), `doctor`, `convert`, `run --watch` (mtime poll, std only)
+
+### 12.4 New capabilities
+- [ ] Data contracts: `Range` / `OneOf` / `Type` checks in `expect.rs`
+- [ ] Schema drift: `schema --save` and `schema --against` (non-zero exit on drift)
+- [ ] `tptforge diff a b --key id` — streaming diff over the existing external sort + merge join
+- [ ] Deterministic keyed sampling stage (reuse `hash_key`)
+- [ ] `--manifest` provenance JSON (counts, stage stats, input/spec hashes)
+- [ ] Checkpoint/resume for stateless pipelines only — **needs explicit approval**
+      (checkpointing is listed above as "not planned")

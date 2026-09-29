@@ -66,11 +66,22 @@ exactly the mapped columns (existing columns are not preserved).
 
 ### `.group_by(columns).agg({column: fn})`
 Aggregate with `fn` in `sum`, `avg`, `count`, `count_all`, `min`, `max`.
-Output columns are named `{fn}_{column}` (except `count_all`).
+Output columns are named `{fn}_{column}` — **except `count_all`**, which takes
+no input column and is named after the *key you gave it*:
 
 ```python
 Pipeline().read_csv("in.csv").group_by(["country"]).agg({"amount": "sum"})
+# -> country, sum_amount
+Pipeline().read_csv("in.csv").group_by(["country"]).agg({"amount": "count_all"})
+# -> country, amount        (the key is the output name, so pass an output-ish key)
+Pipeline().read_csv("in.csv").group_by(["country"]).agg({"rows": "count_all"})
+# -> country, rows          (clearer: the key names the new column)
 ```
+
+So `{"amount": "count_all"}` *replaces* the `amount` column with the row count.
+Use a fresh key such as `{"n": "count_all"}` when you want to keep the original.
+This differs from the CLI and WASM bindings, where `count_all` always produces a
+column literally named `count_all`; see each binding's README.
 
 ### `.sort(columns, descending=False)`
 Stable external merge sort (spills to disk under the system temp dir when the
@@ -112,11 +123,26 @@ standard `AWS_*` / `AZURE_*` environment variables).
 ### More stages
 
 - `.select([...columns])` — projection
+- `.limit(n)` — keep only the first `n` rows
 - `.join_csv(right_path, left_keys, right_keys, join_type="inner")` — hash
   join against a CSV build side (`inner`/`left`/`right`)
 - `.expect(rows_at_least=…, rows_at_most=…, no_nulls=[…], unique=[…])` —
   data-quality gate; violations abort `execute()`
 - `.on_error("strict" | "skip" | "quarantine:<path>")` — malformed-row policy
+- `.dead_letter(path)` — capture rows a *stage* rejects into a CSV instead of
+  aborting the run; `.dead_letter_rows()` reports the count. The queue file gets
+  `_dead_letter_stage` and `_error` columns ahead of the row's own fields. Not
+  supported with stateful stages (aggregate/sort/dedup/join/expect), because
+  isolating a bad row would re-run them over a subset of their input — those
+  combinations fail loudly with a `Config` error.
+- `.with_retry(attempts, base_delay_ms=100, max_delay_ms=10000)` — retry
+  *transient* network failures (connection resets, 408/429/5xx) for the next
+  `read_*`/`write_*`; a 4xx that isn't 408/429 fails fast because retrying it
+  cannot help. It is one-shot, so a policy never leaks onto a later source:
+
+  ```python
+  Pipeline().with_retry(3).read_s3(bucket, key).write_azure(url, "c", "out.csv")
+  ```
 
 ### `.stage_stats()`
 Cumulative per-stage metrics from the last `execute()` run: a list of dicts
@@ -125,7 +151,9 @@ with `name`, `rows_in`, `rows_out`, `batches`, `elapsed_ms`, and
 
 ### `.execute()`
 Run the pipeline (blocking). Raises `TptError` on expression parse errors,
-schema mismatches, or I/O failures.
+schema mismatches, or I/O failures. `rows`/`batches` count what the **source**
+produced; to see how many rows actually came out, use the last
+`stage_stats()` entry's `rows_out`.
 
 ### `.explain()` / `.preview(n)` / `.collect()`
 

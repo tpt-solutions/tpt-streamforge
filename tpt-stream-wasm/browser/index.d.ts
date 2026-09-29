@@ -1,3 +1,12 @@
+export interface TelemetryEvent {
+  op: string;
+  done: number;
+  total: number;
+  rowsIn: number;
+  rowsOut: number;
+  elapsedMs: number;
+}
+
 export interface ExecuteResult {
   rows: number;
   csv: string;
@@ -24,7 +33,8 @@ export declare class Pipeline {
   dedup(columns: string[]): this;
   /**
    * GROUP BY with fns in {sum, avg, count, count_all, min, max} per column.
-   * `count_all` ignores its column. Output columns are named `{fn}_{col}`.
+   * Output columns are named `{fn}_{col}`, except `count_all`, which takes no
+   * input column (pass `''`) and is always named `count_all`.
    */
   aggregate(groupBy: string[], fns: string[], columns: string[]): this;
   /**
@@ -43,6 +53,10 @@ export declare class Pipeline {
   toArrayBuffer(): ArrayBuffer;
   /** Serialize the current result to a JSON array of objects. */
   toJSON(): unknown[];
+  /**
+   * Serialise the pipeline's current state. Transforms already ran eagerly
+   * when they were chained, so this does no additional work.
+   */
   execute(): ExecuteResult;
   readonly engine: Engine;
 }

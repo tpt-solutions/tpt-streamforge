@@ -36,6 +36,8 @@ pub mod sink;
 #[cfg(feature = "async")]
 pub mod sort;
 pub mod source;
+#[cfg(feature = "async")]
+pub(crate) mod spill;
 #[cfg(all(feature = "async", feature = "sqlite"))]
 pub mod sqlite;
 pub mod table {

@@ -181,7 +181,7 @@ impl Sort {
     }
 
     fn run_path(&self, run_index: usize) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+        crate::spill::spill_dir().join(format!(
             "tpt-streamforge-sort-{}-r{run_index}.tptcol",
             self.id
         ))

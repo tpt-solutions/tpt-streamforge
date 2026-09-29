@@ -102,24 +102,77 @@ impl RecordBatch {
         col.get(row)
     }
 
-    pub fn append_rows(&mut self, other: &RecordBatch) {
-        assert_eq!(
-            self.columns.len(),
-            other.columns.len(),
-            "column count mismatch in append_rows"
-        );
+    /// Fallible [`Self::append_rows`]. Use when the batches come from an
+    /// untrusted source (a `.tptcol` file) so a schema mismatch is a normal
+    /// error rather than a panic.
+    pub fn try_append_rows(&mut self, other: &RecordBatch) -> Result<(), AppendError> {
+        if self.columns.len() != other.columns.len() {
+            return Err(AppendError::ColumnCount {
+                left: self.columns.len(),
+                right: other.columns.len(),
+            });
+        }
         for (i, col) in self.columns.iter_mut().enumerate() {
             let other_col = &other.columns[i];
-            assert_eq!(
-                col.name(),
-                other_col.name(),
-                "column names must match in append_rows"
-            );
-            col.append_column(other_col);
+            if col.name() != other_col.name() {
+                return Err(AppendError::ColumnName {
+                    index: i,
+                    left: col.name().to_string(),
+                    right: other_col.name().to_string(),
+                });
+            }
+            col.try_append_column(other_col)?;
         }
         self.row_count += other.row_count;
+        Ok(())
+    }
+
+    /// Panics if the schemas differ; use [`Self::try_append_rows`] for
+    /// untrusted batches.
+    pub fn append_rows(&mut self, other: &RecordBatch) {
+        if let Err(e) = self.try_append_rows(other) {
+            panic!("{e}");
+        }
     }
 }
+
+/// Why two record batches could not be concatenated.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppendError {
+    /// Different number of columns.
+    ColumnCount { left: usize, right: usize },
+    /// Column names differ at this index.
+    ColumnName {
+        index: usize,
+        left: String,
+        right: String,
+    },
+    /// A column's data type differs.
+    Type(crate::column::TypeMismatch),
+}
+
+impl From<crate::column::TypeMismatch> for AppendError {
+    fn from(e: crate::column::TypeMismatch) -> Self {
+        AppendError::Type(e)
+    }
+}
+
+impl std::fmt::Display for AppendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppendError::ColumnCount { left, right } => {
+                write!(f, "column count mismatch in append_rows: {left} vs {right}")
+            }
+            AppendError::ColumnName { index, left, right } => write!(
+                f,
+                "column names must match in append_rows: column {index} is {left:?} vs {right:?}"
+            ),
+            AppendError::Type(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for AppendError {}
 
 #[cfg(test)]
 mod tests {

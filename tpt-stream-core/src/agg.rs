@@ -97,6 +97,20 @@ enum Acc {
     Max(Value),
 }
 
+impl Acc {
+    /// Variant name for error messages.
+    fn kind(&self) -> &'static str {
+        match self {
+            Acc::SumInt(_) => "sum_int",
+            Acc::SumFloat(_) => "sum_float",
+            Acc::Avg { .. } => "avg",
+            Acc::Count(_) => "count",
+            Acc::Min(_) => "min",
+            Acc::Max(_) => "max",
+        }
+    }
+}
+
 struct Group {
     key: Vec<Value>,
     accs: Vec<Acc>,
@@ -140,7 +154,7 @@ impl GroupByAgg {
     }
 
     fn spill_path(&self, partition: usize) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+        crate::spill::spill_dir().join(format!(
             "tpt-streamforge-agg-{}-p{partition}.tptcol",
             self.spilled.as_ref().expect("spill state").id
         ))
@@ -277,7 +291,8 @@ impl GroupByAgg {
             if written.is_empty() || !written[p] {
                 continue;
             }
-            let path = std::env::temp_dir().join(format!("tpt-streamforge-agg-{id}-p{p}.tptcol"));
+            let path =
+                crate::spill::spill_dir().join(format!("tpt-streamforge-agg-{id}-p{p}.tptcol"));
             let file = std::fs::File::open(&path)?;
             let mut reader = ChunkedReader::new(file);
             while let Some(batch) = reader.next_batch()? {
@@ -402,13 +417,24 @@ impl GroupByAgg {
 // Aggregation math
 // ---------------------------------------------------------------------------
 
+/// Bump a COUNT accumulator. The accumulator is created from the same
+/// `AggSpec` that drives accumulation, so any other variant means an internal
+/// inconsistency; report it as a normal error rather than panicking so a single
+/// malformed run fails cleanly instead of aborting the process.
+fn count_one(running: &Acc, output: &str) -> Result<Acc> {
+    match running {
+        Acc::Count(c) => Ok(Acc::Count(c + 1)),
+        other => Err(Error::Other(format!(
+            "internal: COUNT accumulator expected for {output:?}, found {}",
+            other.kind()
+        ))),
+    }
+}
+
 fn accumulate(running: &Acc, spec: &AggSpec, batch: &RecordBatch, ri: usize) -> Result<Acc> {
     let (Some(col), function) = (&spec.input, spec.function) else {
         if spec.function == AggFn::Count {
-            return match running {
-                Acc::Count(c) => Ok(Acc::Count(c + 1)),
-                _ => panic!("internal: Count accumulator expected"),
-            };
+            return count_one(running, &spec.output);
         }
         return Err(Error::Schema(
             "aggregation needs an input column (except COUNT(*))".into(),
@@ -420,10 +446,7 @@ fn accumulate(running: &Acc, spec: &AggSpec, batch: &RecordBatch, ri: usize) -> 
         return Ok(running.clone());
     }
     if function == AggFn::Count {
-        return match running {
-            Acc::Count(c) => Ok(Acc::Count(c + 1)),
-            _ => panic!("internal: Count accumulator expected"),
-        };
+        return count_one(running, &spec.output);
     }
 
     match (running, function) {

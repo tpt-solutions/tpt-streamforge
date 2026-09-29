@@ -42,6 +42,14 @@ impl GcsStore {
         self.0.bucket_name()
     }
 
+    /// Retry transient request failures (connection resets, 408/429/5xx)
+    /// according to `policy`. Off by default.
+    #[must_use]
+    pub fn with_retry(mut self, policy: crate::httpclient::RetryPolicy) -> Self {
+        self.0 = self.0.with_retry(policy);
+        self
+    }
+
     /// Stream an object body with a `GET`.
     pub fn read_object(&self, key: &str) -> Result<Box<dyn BufRead + Send>> {
         self.0.read_object(key)

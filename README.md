@@ -55,7 +55,9 @@ loading whole datasets into memory.
 - **JavaScript / WASM** (`tpt-stream-wasm`) — an in-memory `Engine` and fluent
   wrappers for Node (`tpt-streamforge-node`) and browsers
   (`tpt-streamforge-browser`), compiled with wasm-bindgen/wasm-pack.
-- **C FFI** (`tpt-stream-ffi`) — the C ABI used by the Python package.
+- **C FFI** (`tpt-stream-ffi`) — a small C ABI (`cdylib` + `staticlib`, cbindgen
+  header) for embedding pipelines in C/C++ programs. The Python package binds
+  the Rust core directly through PyO3, not through this crate.
 
 ## Package layout
 

@@ -13,12 +13,26 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Rust",
     "Operating System :: OS Independent",
+    "Typing :: Typed",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+pandas = ["pandas>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/tpt-solutions/tpt-streamforge"
+Repository = "https://github.com/tpt-solutions/tpt-streamforge"
+Issues = "https://github.com/tpt-solutions/tpt-streamforge/issues"
+Changelog = "https://github.com/tpt-solutions/tpt-streamforge/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 python-source = "python"
 module-name = "tpt_streamforge._native"
 features = ["pyo3/extension-module"]
+# Ship the hand-written stubs and the PEP 561 marker so type checkers and
+# editors see the real API instead of an untyped extension module.
+include = [
+    { path = "python/tpt_streamforge/py.typed", format = ["sdist", "wheel"] },
+    { path = "python/tpt_streamforge/_native.pyi", format = ["sdist", "wheel"] },
+]

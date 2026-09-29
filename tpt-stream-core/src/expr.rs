@@ -25,7 +25,16 @@ pub enum ExprErrorKind {
     UnterminatedString,
     UnexpectedEnd,
     InvalidNumber,
+    /// Nesting or length beyond `MAX_DEPTH` / `MAX_TOKENS`; rejected up front
+    /// because a hostile expression could otherwise overflow the stack while
+    /// parsing, evaluating, or dropping the tree.
+    TooComplex,
 }
+
+/// Deepest nesting of parentheses / unary operators / call arguments.
+const MAX_DEPTH: usize = 64;
+/// Most tokens in one expression (also bounds left-deep `a+b+c+...` chains).
+const MAX_TOKENS: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct ExprError {
@@ -83,7 +92,17 @@ pub enum BinOp {
 /// offset where parsing failed.
 pub fn parse(input: &str) -> Result<Expr, ExprError> {
     let tokens = tokenize(input)?;
-    let mut parser = Parser { tokens, pos: 0 };
+    if tokens.len() > MAX_TOKENS {
+        return Err(ExprError {
+            kind: ExprErrorKind::TooComplex,
+            pos: tokens[MAX_TOKENS].1,
+        });
+    }
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let expr = parser.parse_or()?;
     if parser.pos < parser.tokens.len() {
         return Err(ExprError {
@@ -266,6 +285,7 @@ fn tokenize(input: &str) -> Result<Vec<(Tok, usize)>, ExprError> {
 struct Parser {
     tokens: Vec<(Tok, usize)>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -294,7 +314,25 @@ impl Parser {
         matches!(tok, Tok::Ident(w) if w == word) || matches!(tok, Tok::Op(op) if op == word)
     }
 
+    /// Run `f` one nesting level deeper, failing past `MAX_DEPTH`.
+    fn nested<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, ExprError>,
+    ) -> Result<T, ExprError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.err(ExprErrorKind::TooComplex));
+        }
+        self.depth += 1;
+        let out = f(self);
+        self.depth -= 1;
+        out
+    }
+
     fn parse_or(&mut self) -> Result<Expr, ExprError> {
+        self.nested(Self::parse_or_inner)
+    }
+
+    fn parse_or_inner(&mut self) -> Result<Expr, ExprError> {
         let mut left = self.parse_and()?;
         while let Some((ref tok, _)) = self.peek() {
             if Self::is_keyword(tok, "or") {
@@ -393,6 +431,10 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ExprError> {
+        self.nested(Self::parse_unary_inner)
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr, ExprError> {
         if let Some((ref tok, _)) = self.peek() {
             let op = match tok {
                 Tok::Op(op) => op.clone(),
@@ -904,5 +946,26 @@ mod tests {
         assert!(parse("a == ").is_err());
         assert!(parse("'unterminated").is_err());
         assert!(parse("a @ b").is_err());
+    }
+    #[test]
+    fn deeply_nested_input_is_rejected_not_overflowed() {
+        let parens = format!("{}1{}", "(".repeat(100_000), ")".repeat(100_000));
+        assert!(parse(&parens).is_err());
+        let negs = format!("{}1", "-".repeat(100_000));
+        assert!(parse(&negs).is_err());
+        let nots = format!("{}true", "not ".repeat(10_000));
+        assert!(parse(&nots).is_err());
+        let chain = vec!["1"; 100_000].join("+");
+        assert!(matches!(
+            parse(&chain).unwrap_err().kind,
+            ExprErrorKind::TooComplex
+        ));
+    }
+
+    #[test]
+    fn moderate_nesting_still_parses() {
+        let e = format!("{}1{}", "(".repeat(30), ")".repeat(30));
+        assert!(parse(&e).is_ok());
+        assert!(parse("- - - -1").is_ok());
     }
 }

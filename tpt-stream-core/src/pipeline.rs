@@ -183,6 +183,11 @@ impl Pipeline {
         Ok(self)
     }
 
+    /// Rows captured by the dead-letter queue so far (0 if none is attached).
+    pub fn dead_letter_rows(&self) -> u64 {
+        self.dead_letter.as_ref().map_or(0, |q| q.rows)
+    }
+
     /// Human-readable stage plan, e.g. `csv source -> filter -> csv sink`.
     pub fn explain(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -560,6 +565,15 @@ impl Pipeline {
         self
     }
 
+    /// Like [`Pipeline::write_postgres`] but with a pre-built sink, so a caller
+    /// can set options the shorthand has no argument for (e.g.
+    /// [`crate::postgres::PostgresSink::with_retry`] or `overwrite()`).
+    #[cfg(feature = "postgres")]
+    pub fn write_postgres_sink(&mut self, sink: crate::postgres::PostgresSink) -> &mut Self {
+        self.sink(sink);
+        self
+    }
+
     /// Stream an S3 (or S3-compatible) object as the source. The data format
     /// comes from the key extension: `.csv` (default), `.jsonl`/`.ndjson`,
     /// `.json`, `.tptcol` (feature `s3`).
@@ -571,8 +585,17 @@ impl Pipeline {
         credentials: &crate::s3::CloudCredentials,
     ) -> Result<&mut Self> {
         let store = crate::s3::S3Store::new(bucket_url, credentials)?;
-        self.source(crate::s3::S3Source::open(store, key));
+        self.read_s3_store(store, key);
         Ok(self)
+    }
+
+    /// Like [`Pipeline::read_s3`] but with a pre-built store, so a caller can
+    /// apply settings (e.g. [`crate::s3::S3Store::with_retry`]) the shorthand
+    /// has no argument for.
+    #[cfg(feature = "s3")]
+    pub fn read_s3_store(&mut self, store: crate::s3::S3Store, key: &str) -> &mut Self {
+        self.source(crate::s3::S3Source::open(store, key));
+        self
     }
 
     /// Upload the pipeline output to an S3 (or S3-compatible) object; small
@@ -586,8 +609,16 @@ impl Pipeline {
         credentials: &crate::s3::CloudCredentials,
     ) -> Result<&mut Self> {
         let store = crate::s3::S3Store::new(bucket_url, credentials)?;
-        self.sink(crate::s3::S3Sink::new(store, key));
+        self.write_s3_store(store, key);
         Ok(self)
+    }
+
+    /// Like [`Pipeline::write_s3`] but with a pre-built store (see
+    /// [`Pipeline::read_s3_store`]).
+    #[cfg(feature = "s3")]
+    pub fn write_s3_store(&mut self, store: crate::s3::S3Store, key: &str) -> &mut Self {
+        self.sink(crate::s3::S3Sink::new(store, key));
+        self
     }
 
     /// Stream a Google Cloud Storage object via the S3-compatible XML API
@@ -600,8 +631,15 @@ impl Pipeline {
         credentials: &crate::s3::CloudCredentials,
     ) -> Result<&mut Self> {
         let store = crate::gcs::GcsStore::new(bucket, credentials)?;
-        self.source(crate::gcs::GcsSource::open(store, key));
+        self.read_gcs_store(store, key);
         Ok(self)
+    }
+
+    /// Like [`Pipeline::read_gcs`] but with a pre-built store.
+    #[cfg(feature = "gcs")]
+    pub fn read_gcs_store(&mut self, store: crate::gcs::GcsStore, key: &str) -> &mut Self {
+        self.source(crate::gcs::GcsSource::open(store, key));
+        self
     }
 
     /// Upload the pipeline output to a Google Cloud Storage object (feature
@@ -614,8 +652,15 @@ impl Pipeline {
         credentials: &crate::s3::CloudCredentials,
     ) -> Result<&mut Self> {
         let store = crate::gcs::GcsStore::new(bucket, credentials)?;
-        self.sink(crate::gcs::GcsSink::new(store, key));
+        self.write_gcs_store(store, key);
         Ok(self)
+    }
+
+    /// Like [`Pipeline::write_gcs`] but with a pre-built store.
+    #[cfg(feature = "gcs")]
+    pub fn write_gcs_store(&mut self, store: crate::gcs::GcsStore, key: &str) -> &mut Self {
+        self.sink(crate::gcs::GcsSink::new(store, key));
+        self
     }
 
     /// Stream a plain HTTP(S) URL as the source; the data format comes from

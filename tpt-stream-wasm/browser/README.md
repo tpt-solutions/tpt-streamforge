@@ -23,7 +23,10 @@ console.log(p.toJSON());
 - `Pipeline.fromFile(file, chunkRows?)` — from a `File` or `Blob` (async).
 - Fluent transforms (each returns `this`): `filter(expr)`, `map(columns, exprs)`,
   `sort(columns, descending?)`, `dedup(columns)`,
-  `aggregate(groupBy, fns, columns)`.
+  `aggregate(groupBy, fns, columns)`. `fns[i]` applies to `columns[i]`; fns are
+  sum, avg, count, count_all, min, max. Output columns are named
+  `{fn}_{column}`, except `count_all`, which takes no input column and is always
+  named `count_all` (pass `''` in `columns`).
 - Results: `toCSV()`, `toJSON()`, `toArrayBuffer()`, `numRows()`, `columnNames()`,
   `execute()` → `{ rows, csv }`.
 - Telemetry: `onProgress(callback)` / `clearProgress()`. The callback fires

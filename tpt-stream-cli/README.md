@@ -94,7 +94,11 @@ CLI no longer depends on an Apache-2.0-only TOML/YAML transitive crate
 - `map = { out_col = "<expr>" }` — replace the schema with computed columns
 - `select = [col, ...]` — project columns
 - `aggregate = { group_by = [...], aggs = { col = fn, "*" = "count_all" } }` —
-  fns: `sum`, `avg`, `count`, `count_all`, `min`, `max`
+  fns: `sum`, `avg`, `count`, `count_all`, `min`, `max`. Output columns are
+  named `{fn}_{col}`, except `count_all`: with the `"*"` key it is named
+  `count_all`, and with a column key `col = "count_all"` it is named
+  `count_col`. The `"*"` form is the usual way to get a row count.
+- `limit = n` — keep only the first `n` rows
 - `sort = { columns = [...], descending = false }`
 - `dedup = [col, ...]`
 - `join = { right = "file.csv", left_keys = [...], right_keys = [...], type = "inner"|"left"|"right" }`
@@ -150,11 +154,17 @@ tptforge sql "SELECT day, amount * 2 AS doubled FROM 'events.csv.gz'   WHERE day
 ```
 
 Supported: single-table `SELECT` with column/arithmetic projections
-(aliases via `AS`), `WHERE` (comparisons, `AND`/`OR`/`NOT`, `IS [NOT] NULL`,
-arithmetic), `GROUP BY` with `SUM`/`AVG`/`COUNT`/`MIN`/`MAX`, `ORDER BY ...
-[ASC|DESC]`, and `LIMIT`. `FROM` accepts any file the sources support
-(CSV/JSONL/JSON/`.tptcol`, `.gz`, http(s) URLs). Unsupported SQL fails with
-an explicit error. Results print as CSV; `--out FILE` writes them instead.
+(aliases via `AS`), `DISTINCT`, `WHERE` (comparisons, `AND`/`OR`/`NOT`,
+`IS [NOT] NULL`, arithmetic), `GROUP BY` with `SUM`/`AVG`/`COUNT`/`MIN`/`MAX`,
+`ORDER BY ... [ASC|DESC]`, and `LIMIT`. `FROM` accepts any file the sources
+support (CSV/JSONL/JSON/`.tptcol`, `.gz`, http(s) URLs). Unsupported SQL fails
+with an explicit error. Results print as CSV; `--out FILE` writes them instead.
+
+`DISTINCT` dedups on the *projected* columns, so `SELECT DISTINCT region,
+product` keeps two `north` rows that differ in `product`; `SELECT DISTINCT *`
+compares whole rows. It runs after `WHERE` and before `ORDER BY`/`LIMIT`, and
+it is skipped when `GROUP BY` is present (which already collapses the keys).
+`DISTINCT ON (...)` (Postgres-style) is not supported.
 
 ## Inspecting data
 

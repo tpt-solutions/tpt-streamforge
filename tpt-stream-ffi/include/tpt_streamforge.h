@@ -95,7 +95,8 @@ typedef struct TptAggSpec {
 int tpt_error_string(char *buffer, uintptr_t capacity, uintptr_t *written);
 
 /**
- * Return the last error status code without clearing it.
+ * Return the status code of the last failed call on this thread (`TPT_OK` if
+ * none has failed) without clearing it.
  */
 int tpt_last_error_code(void);
 

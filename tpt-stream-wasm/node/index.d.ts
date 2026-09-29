@@ -51,7 +51,8 @@ export class Pipeline {
   dedup(columns: string[]): this;
   /**
    * GROUP BY with fns in {sum, avg, count, count_all, min, max} per column.
-   * `count_all` ignores its column. Output columns are named `{fn}_{col}`.
+   * Output columns are named `{fn}_{col}`, except `count_all`, which takes no
+   * input column (pass `''`) and is always named `count_all`.
    */
   aggregate(groupBy: string[], fns: string[], columns: string[]): this;
   /**
@@ -70,6 +71,10 @@ export class Pipeline {
   toJSON(): unknown[];
   /** Write CSV to disk. */
   writeFile(path: string): this;
+  /**
+   * Serialise the pipeline's current state. Transforms already ran eagerly
+   * when they were chained, so this does no additional work.
+   */
   execute(): ExecuteResult;
   readonly engine: Engine;
 }

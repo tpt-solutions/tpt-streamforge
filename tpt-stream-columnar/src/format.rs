@@ -1,4 +1,4 @@
-use crate::column::Column;
+use crate::column::{Column, TypeMismatch};
 use crate::table::RecordBatch;
 use crate::value::{DataType, Value};
 use std::io::{Read, Write};
@@ -8,6 +8,13 @@ pub const MAGIC: [u8; 8] = *b"TPTCOL1\x00";
 pub const VERSION: u16 = 1;
 
 const FLAG_ZSTD: u16 = 0x0001;
+
+/// Upper bound on any single (decompressed) column buffer read from a file.
+/// Sizes in a `.tptcol` header are untrusted; without a cap a 60-byte file
+/// could request an exabyte allocation and abort the process.
+const MAX_BUFFER_BYTES: usize = 512 * 1024 * 1024;
+/// Upper bound on the column count declared by a chunk header.
+const MAX_COLUMNS: usize = 65_536;
 
 #[derive(Debug, Error)]
 pub enum FormatError {
@@ -23,6 +30,9 @@ pub enum FormatError {
     Malformed(String),
     #[error("zstd error: {0}")]
     Zstd(String),
+    /// A decoded value did not match its column's declared type.
+    #[error("column type mismatch: {0}")]
+    TypeMismatch(#[from] TypeMismatch),
 }
 
 pub type Result<T> = std::result::Result<T, FormatError>;
@@ -52,7 +62,27 @@ fn compress(data: &[u8]) -> Result<Vec<u8>> {
 fn decompress(data: &[u8], expected_len: usize) -> Result<Vec<u8>> {
     #[cfg(feature = "zstd")]
     {
-        zstd::bulk::decompress(data, expected_len).map_err(|e| FormatError::Zstd(e.to_string()))
+        if expected_len > MAX_BUFFER_BYTES {
+            return Err(FormatError::Malformed(format!(
+                "declared buffer size {expected_len} exceeds limit {MAX_BUFFER_BYTES}"
+            )));
+        }
+        // Stream the output so memory grows with real data, never with the
+        // header's claim; read one byte past the claim to detect overrun.
+        let decoder =
+            zstd::stream::read::Decoder::new(data).map_err(|e| FormatError::Zstd(e.to_string()))?;
+        let mut out = Vec::new();
+        decoder
+            .take(expected_len as u64 + 1)
+            .read_to_end(&mut out)
+            .map_err(|e| FormatError::Zstd(e.to_string()))?;
+        if out.len() != expected_len {
+            return Err(FormatError::Malformed(format!(
+                "decompressed size {} does not match declared {expected_len}",
+                out.len()
+            )));
+        }
+        Ok(out)
     }
     #[cfg(not(feature = "zstd"))]
     {
@@ -77,6 +107,26 @@ fn maybe_decompress(data: &[u8], expected_len: usize, was_compressed: bool) -> R
     } else {
         Ok(data.to_vec())
     }
+}
+
+fn to_usize(v: u64, what: &str) -> Result<usize> {
+    usize::try_from(v).map_err(|_| FormatError::Malformed(format!("{what} out of range: {v}")))
+}
+
+fn check_num_columns(n: u32) -> Result<usize> {
+    let n = n as usize;
+    if n > MAX_COLUMNS {
+        return Err(FormatError::Malformed(format!(
+            "column count {n} exceeds limit {MAX_COLUMNS}"
+        )));
+    }
+    Ok(n)
+}
+
+fn column_name(bytes: &[u8]) -> Result<String> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| FormatError::Malformed("column name is not valid UTF-8".into()))
 }
 
 fn encode_dtype(data_type: DataType) -> u8 {
@@ -204,6 +254,27 @@ fn decode_buffer(
     data: &[u8],
     nulls: &[bool],
 ) -> Result<crate::column::ColumnBuffer> {
+    // Validate declared sizes against the bytes actually present *before*
+    // allocating anything sized by `rows`.
+    if nulls.len() != rows {
+        return Err(FormatError::Malformed(format!(
+            "null bitmap has {} entries for {rows} rows",
+            nulls.len()
+        )));
+    }
+    let min_bytes = match data_type {
+        DataType::Int32 | DataType::Float32 | DataType::Date => rows.checked_mul(4),
+        DataType::Int64 | DataType::Float64 | DataType::Timestamp => rows.checked_mul(8),
+        DataType::Bool => Some(rows),
+        DataType::Utf8 => rows.checked_add(1).and_then(|n| n.checked_mul(8)),
+    }
+    .ok_or_else(|| FormatError::Malformed("row count overflow".into()))?;
+    if data.len() < min_bytes {
+        return Err(FormatError::Malformed(format!(
+            "data buffer too short: {} bytes for {rows} rows",
+            data.len()
+        )));
+    }
     let mut buffer = crate::column::ColumnBuffer::with_capacity(data_type, rows);
     for i in 0..rows {
         if nulls[i] {
@@ -267,7 +338,7 @@ fn decode_buffer(
             }
             DataType::Utf8 => decode_utf8(data, i, rows)?,
         };
-        buffer.push_value(value);
+        buffer.try_push_value(value)?;
     }
     Ok(buffer)
 }
@@ -292,27 +363,32 @@ fn slice_chunk<'a, const N: usize>(
 }
 
 fn decode_utf8(data: &[u8], index: usize, rows: usize) -> Result<Value> {
-    if data.len() < (rows + 1) * 8 {
+    let overflow = || FormatError::Malformed("utf8 offset overflow".into());
+    let blob_start = rows
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(8))
+        .ok_or_else(overflow)?;
+    if data.len() < blob_start {
         return Err(FormatError::Malformed(
             "utf8 offsets buffer too short".into(),
         ));
     }
-    let start = u64::from_le_bytes(
-        data[index * 8..index * 8 + 8]
+    let read_off = |i: usize| -> Result<usize> {
+        let b: [u8; 8] = data[i * 8..i * 8 + 8]
             .try_into()
-            .map_err(|_| FormatError::Malformed("utf8 start-offset slice length".into()))?,
-    ) as usize;
-    let end = u64::from_le_bytes(
-        data[(index + 1) * 8..(index + 1) * 8 + 8]
-            .try_into()
-            .map_err(|_| FormatError::Malformed("utf8 end-offset slice length".into()))?,
-    ) as usize;
-    let blob_start = (rows + 1) * 8;
-    if end < start || blob_start + end > data.len() {
+            .map_err(|_| FormatError::Malformed("utf8 offset slice length".into()))?;
+        usize::try_from(u64::from_le_bytes(b)).map_err(|_| overflow())
+    };
+    let start = read_off(index)?;
+    let end = read_off(index + 1)?;
+    let abs_end = blob_start.checked_add(end).ok_or_else(overflow)?;
+    if end < start || abs_end > data.len() {
         return Err(FormatError::Malformed("utf8 offset out of range".into()));
     }
-    let bytes = &data[blob_start + start..blob_start + end];
-    let s = String::from_utf8_lossy(bytes).into_owned();
+    let bytes = &data[blob_start + start..abs_end];
+    let s = std::str::from_utf8(bytes)
+        .map_err(|_| FormatError::Malformed("utf8 cell is not valid UTF-8".into()))?
+        .to_owned();
     Ok(Value::Utf8(s))
 }
 
@@ -404,29 +480,25 @@ pub fn decode_batch(bytes: &[u8]) -> Result<RecordBatch> {
     }
     let flags = read_u16(&mut r, "flags")?;
     let was_compressed = flags & FLAG_ZSTD != 0;
-    let num_columns = read_u32(&mut r, "num_columns")? as usize;
-    let num_rows = read_u64(&mut r, "num_rows")? as usize;
+    let num_columns = check_num_columns(read_u32(&mut r, "num_columns")?)?;
+    let num_rows = to_usize(read_u64(&mut r, "num_rows")?, "num_rows")?;
 
-    let mut columns = Vec::with_capacity(num_columns);
+    let mut columns = Vec::with_capacity(num_columns.min(1024));
     for _ in 0..num_columns {
         let name_len = read_u16(&mut r, "name_len")? as usize;
         let name_bytes = read_n(&mut r, name_len, "column name")?;
-        let name = String::from_utf8_lossy(name_bytes).into_owned();
+        let name = column_name(name_bytes)?;
         let type_byte = read_n(&mut r, 1, "column type")?[0];
         let data_type = DataType::from_byte(type_byte).ok_or(FormatError::BadType(type_byte))?;
 
-        let null_len = read_u64(&mut r, "null_len")? as usize;
-        let null_stored_len = read_u64(&mut r, "null_bytes_len")? as usize;
+        let null_len = to_usize(read_u64(&mut r, "null_len")?, "null_len")?;
+        let null_stored_len = to_usize(read_u64(&mut r, "null_bytes_len")?, "null_bytes_len")?;
         let null_stored = read_n(&mut r, null_stored_len, "null bytes")?;
         let null_bytes = maybe_decompress(null_stored, null_len, was_compressed)?;
-        let nulls: Vec<bool> = if null_len == 0 {
-            Vec::with_capacity(0)
-        } else {
-            null_bytes.iter().map(|b| *b != 0).collect()
-        };
+        let nulls: Vec<bool> = null_bytes.iter().map(|b| *b != 0).collect();
 
-        let data_len = read_u64(&mut r, "data_len")? as usize;
-        let data_stored_len = read_u64(&mut r, "data_bytes_len")? as usize;
+        let data_len = to_usize(read_u64(&mut r, "data_len")?, "data_len")?;
+        let data_stored_len = to_usize(read_u64(&mut r, "data_bytes_len")?, "data_bytes_len")?;
         let data_stored = read_n(&mut r, data_stored_len, "data bytes")?;
         let data_bytes = maybe_decompress(data_stored, data_len, was_compressed)?;
 
@@ -539,37 +611,39 @@ impl<R: Read> ChunkedReader<R> {
 
         let mut counts = [0u8; 12];
         self.read_exact(&mut counts)?;
-        let num_columns = u32::from_le_bytes([counts[0], counts[1], counts[2], counts[3]]) as usize;
-        let num_rows = u64::from_le_bytes([
-            counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
-            counts[11],
-        ]) as usize;
+        let num_columns = check_num_columns(u32::from_le_bytes([
+            counts[0], counts[1], counts[2], counts[3],
+        ]))?;
+        let num_rows = to_usize(
+            u64::from_le_bytes([
+                counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
+                counts[11],
+            ]),
+            "num_rows",
+        )?;
 
-        let mut columns = Vec::with_capacity(num_columns);
+        let mut columns = Vec::with_capacity(num_columns.min(1024));
         for _ in 0..num_columns {
             let mut name_len_bytes = [0u8; 2];
             self.read_exact(&mut name_len_bytes)?;
             let name_len = u16::from_le_bytes(name_len_bytes) as usize;
-            let mut name_bytes = vec![0u8; name_len];
-            self.read_exact(&mut name_bytes)?;
-            let name = String::from_utf8_lossy(&name_bytes).into_owned();
+            let name_bytes = self.read_vec(name_len, "column name")?;
+            let name = column_name(&name_bytes)?;
 
             let mut type_byte = [0u8; 1];
             self.read_exact(&mut type_byte)?;
             let data_type = DataType::from_byte(type_byte[0])
                 .ok_or_else(|| FormatError::BadType(type_byte[0]))?;
 
-            let null_len = self.read_u64()? as usize;
-            let null_stored_len = self.read_u64()? as usize;
-            let mut null_stored = vec![0u8; null_stored_len];
-            self.read_exact(&mut null_stored)?;
+            let null_len = to_usize(self.read_u64()?, "null_len")?;
+            let null_stored_len = to_usize(self.read_u64()?, "null_bytes_len")?;
+            let null_stored = self.read_vec(null_stored_len, "null bytes")?;
             let null_bytes = maybe_decompress(&null_stored, null_len, was_compressed)?;
             let nulls: Vec<bool> = null_bytes.iter().map(|b| *b != 0).collect();
 
-            let data_len = self.read_u64()? as usize;
-            let data_stored_len = self.read_u64()? as usize;
-            let mut data_stored = vec![0u8; data_stored_len];
-            self.read_exact(&mut data_stored)?;
+            let data_len = to_usize(self.read_u64()?, "data_len")?;
+            let data_stored_len = to_usize(self.read_u64()?, "data_bytes_len")?;
+            let data_stored = self.read_vec(data_stored_len, "data bytes")?;
             let data_bytes = maybe_decompress(&data_stored, data_len, was_compressed)?;
 
             let buffer = decode_buffer(data_type, num_rows, &data_bytes, &nulls)?;
@@ -577,6 +651,24 @@ impl<R: Read> ChunkedReader<R> {
         }
 
         Ok(Some(RecordBatch::new(columns)))
+    }
+
+    /// Read exactly `len` bytes, growing the buffer only as bytes actually
+    /// arrive so a lying length field cannot force a huge up-front allocation.
+    fn read_vec(&mut self, len: usize, what: &str) -> Result<Vec<u8>> {
+        if len > MAX_BUFFER_BYTES {
+            return Err(FormatError::Malformed(format!(
+                "{what}: declared length {len} exceeds limit {MAX_BUFFER_BYTES}"
+            )));
+        }
+        let mut out = Vec::new();
+        (&mut self.inner).take(len as u64).read_to_end(&mut out)?;
+        if out.len() != len {
+            return Err(FormatError::Malformed(format!(
+                "unexpected EOF while reading {what}"
+            )));
+        }
+        Ok(out)
     }
 
     fn read_u64(&mut self) -> Result<u64> {
@@ -797,5 +889,83 @@ mod tests {
             assert_eq!(decoded.cell(1, "col"), Some(Value::Null));
             assert_eq!(decoded.cell(2, "col"), batch.cell(2, "col"));
         }
+    }
+    // --- Hostile-header regression tests -------------------------------------
+
+    /// Header for one Int64 column named "a" with attacker-chosen sizes.
+    fn hostile_chunk(
+        rows: u64,
+        null_len: u64,
+        null_stored: u64,
+        data_len: u64,
+        data_stored: u64,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&MAGIC);
+        out.extend_from_slice(&VERSION.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&rows.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.push(b'a');
+        out.push(DataType::Int64.to_byte());
+        for v in [null_len, null_stored] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        // (no null bytes follow)
+        for v in [data_len, data_stored] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn chunked_reader_huge_declared_length_is_clean_error() {
+        let bytes = hostile_chunk(1, 1, u64::MAX / 2, 8, 8);
+        let mut reader = ChunkedReader::new(&bytes[..]);
+        assert!(reader.next_batch().is_err());
+        let bytes = hostile_chunk(1, 1, 0, 8, MAX_BUFFER_BYTES as u64 + 1);
+        let mut reader = ChunkedReader::new(&bytes[..]);
+        assert!(reader.next_batch().is_err());
+    }
+
+    #[test]
+    fn huge_row_count_is_clean_error() {
+        // Claims u64::MAX rows but carries no data.
+        let bytes = hostile_chunk(u64::MAX, 0, 0, 0, 0);
+        assert!(decode_batch(&bytes).is_err());
+        let mut reader = ChunkedReader::new(&bytes[..]);
+        assert!(reader.next_batch().is_err());
+    }
+
+    #[test]
+    fn null_bitmap_shorter_than_rows_is_clean_error() {
+        // 4 rows, empty null bitmap, 32 data bytes: previously indexed out of bounds.
+        let mut bytes = hostile_chunk(4, 0, 0, 32, 32);
+        bytes.extend_from_slice(&[0u8; 32]);
+        assert!(decode_batch(&bytes).is_err());
+    }
+
+    #[test]
+    fn too_many_columns_is_clean_error() {
+        let mut out = Vec::new();
+        out.extend_from_slice(&MAGIC);
+        out.extend_from_slice(&VERSION.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&u32::MAX.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        assert!(decode_batch(&out).is_err());
+        assert!(ChunkedReader::new(&out[..]).next_batch().is_err());
+    }
+
+    #[test]
+    fn utf8_offsets_overflow_is_clean_error() {
+        let mut col = Column::new("s", DataType::Utf8, 1);
+        col.push(Value::Utf8("x".into()));
+        let mut bytes = encode_batch(&RecordBatch::new(vec![col]), false).unwrap();
+        // Corrupt the final offset (last 8 bytes before the 1-byte blob).
+        let n = bytes.len();
+        bytes[n - 9..n - 1].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(decode_batch(&bytes).is_err());
     }
 }

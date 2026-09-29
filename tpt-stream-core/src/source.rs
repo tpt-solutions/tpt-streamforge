@@ -220,7 +220,15 @@ pub(crate) fn csv_read_stream(
         let _ = tx.send(Err(Error::Schema("CSV file has no header row".into())));
         return;
     }
-    let mut quarantine = QuarantineWriter::csv(&headers, policy);
+    let mut quarantine = match QuarantineWriter::csv(&headers, policy) {
+        Ok(q) => q,
+        Err(e) => {
+            // Fail before reading any data rather than silently dropping
+            // malformed rows the user believes are being quarantined.
+            let _ = tx.send(Err(Error::Io(e)));
+            return;
+        }
+    };
     let mut schema: Option<Vec<DataType>> = None;
     let mut chunk = ColumnarChunk::new(columnar.num_columns(), chunk_rows);
 
@@ -257,6 +265,22 @@ pub(crate) fn csv_read_stream(
     }
 }
 
+/// Create (truncating) a quarantine file. Quarantined rows are raw input and
+/// may hold PII, so on Unix the file is created owner-only (0600).
+#[cfg(feature = "async")]
+pub(crate) fn open_quarantine_file(
+    path: impl AsRef<std::path::Path>,
+) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
 /// Destination for malformed rows under [`ErrorPolicy::Quarantine`].
 #[cfg(feature = "async")]
 enum QuarantineWriter {
@@ -269,23 +293,19 @@ enum QuarantineWriter {
 
 #[cfg(feature = "async")]
 impl QuarantineWriter {
-    fn csv(headers: &[String], policy: &ErrorPolicy) -> Self {
+    fn csv(headers: &[String], policy: &ErrorPolicy) -> std::io::Result<Self> {
         let ErrorPolicy::Quarantine(path) = policy else {
-            return QuarantineWriter::None;
+            return Ok(QuarantineWriter::None);
         };
-        match std::fs::File::create(path) {
-            Ok(file) => {
-                // Malformed rows may have any field count: flexible(true).
-                let mut writer = tpt_csv::WriterBuilder::new()
-                    .flexible(true)
-                    .from_writer(file);
-                let _ = writer.write_record(headers);
-                QuarantineWriter::Csv(Box::new(writer))
-            }
-            // Quarantine targets are validated when the first malformed row
-            // arrives; a bad path surfaces there as an I/O error.
-            Err(_) => QuarantineWriter::None,
-        }
+        let file = open_quarantine_file(path)?;
+        // Malformed rows may have any field count: flexible(true).
+        let mut writer = tpt_csv::WriterBuilder::new()
+            .flexible(true)
+            .from_writer(file);
+        writer
+            .write_record(headers)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(QuarantineWriter::Csv(Box::new(writer)))
     }
 
     fn write_record<'a, I>(&mut self, fields: I) -> std::io::Result<()>
@@ -674,7 +694,7 @@ pub(crate) fn jsonl_read_stream(
     let mut schema: Option<Vec<(String, DataType)>> = None;
     let mut line = String::new();
     let mut quarantine = match policy {
-        ErrorPolicy::Quarantine(path) => match std::fs::File::create(path) {
+        ErrorPolicy::Quarantine(path) => match open_quarantine_file(path) {
             Ok(f) => QuarantineWriter::Lines(Box::new(f)),
             Err(e) => {
                 let _ = tx.send(Err(Error::Io(e)));

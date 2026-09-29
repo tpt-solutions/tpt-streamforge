@@ -29,6 +29,9 @@ const { Pipeline, createPipeline, readCSV } = require('tpt-streamforge-node');
   - `sort(columns, descending=false)` — stable sort.
   - `dedup(columns)` — keep the first row per key.
   - `aggregate(groupBy, fns, columns)` — fns ∈ {sum, avg, count, count_all, min, max}.
+    Output columns are named `{fn}_{column}`, except `count_all`, which takes no
+    input column and is always named `count_all` (pass `''` in `columns`):
+    `aggregate(['name'], ['count_all'], [''])` → `{ name, count_all }`.
 - Results: `toCSV()`, `toJSON()`, `numRows()`, `columnNames()`, `writeFile(path)`,
   `execute()` → `{ rows, csv }`.
 - Telemetry: `onProgress(callback)` / `clearProgress()`. The callback fires

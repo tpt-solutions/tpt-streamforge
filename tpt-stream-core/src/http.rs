@@ -83,15 +83,17 @@ fn http_read(
         Ok(r) => r,
         Err(crate::httpclient::Error::Status(code, resp)) => {
             let _ = tx.send(Err(Error::Cloud(format!(
-                "http get {url:?}: status {code}: {}",
-                resp.into_string()
-                    .map(|b| b.chars().take(200).collect::<String>())
-                    .unwrap_or_default()
+                "http get {:?}: status {code}: {}",
+                crate::httpclient::redact_url(url),
+                resp.error_snippet()
             ))));
             return;
         }
         Err(crate::httpclient::Error::Transport(t)) => {
-            let _ = tx.send(Err(Error::Cloud(format!("http get {url:?}: {t}"))));
+            let _ = tx.send(Err(Error::Cloud(format!(
+                "http get {:?}: {t}",
+                crate::httpclient::redact_url(url)
+            ))));
             return;
         }
     };

@@ -23,6 +23,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use tpt_stream_core::agg::AggSpec;
+use tpt_stream_core::httpclient::RetryPolicy;
 use tpt_stream_core::join::JoinType;
 use tpt_stream_core::source::ErrorPolicy;
 use tpt_stream_core::{Check, Pipeline};
@@ -145,9 +146,18 @@ fn value_to_py(py: Python<'_>, value: &tpt_stream_core::Value) -> PyResult<Py<Py
 struct PyPipeline {
     inner: Mutex<Pipeline>,
     progress: Mutex<Option<Py<PyAny>>>,
+    /// Retry policy from the most recent `with_retry(...)` call, consumed by
+    /// the next network source/sink builder.
+    retry: Mutex<Option<RetryPolicy>>,
 }
 
 impl PyPipeline {
+    /// Take the pending retry policy (`with_retry(...)` is one-shot, so a
+    /// policy does not silently leak onto later sources).
+    fn take_retry(&self) -> PyResult<Option<RetryPolicy>> {
+        Ok(self.retry.lock().map_err(|_| lock_err())?.take())
+    }
+
     /// Run the pipeline, holding the output in memory (used by `collect`,
     /// `to_arrow`, and `to_pandas`). Consumes the pipeline like `execute`.
     fn collect_batches(&self, py: Python<'_>) -> PyResult<Vec<tpt_stream_core::RecordBatch>> {
@@ -207,6 +217,7 @@ impl PyPipeline {
         PyPipeline {
             inner: Mutex::new(Pipeline::new()),
             progress: Mutex::new(None),
+            retry: Mutex::new(None),
         }
     }
 
@@ -555,12 +566,17 @@ impl PyPipeline {
 
     /// Write batches into a PostgreSQL table (COPY-based bulk load).
     fn write_postgres(slf: Bound<'_, Self>, conn_string: &str, table: &str) -> PyResult<Py<Self>> {
+        let retry = slf.borrow().take_retry()?;
         {
             let cell = slf.borrow_mut();
-            cell.inner
-                .lock()
-                .map_err(|_| lock_err())?
-                .write_postgres(conn_string, table);
+            let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
+            if let Some(policy) = retry {
+                let sink =
+                    tpt_stream_core::PostgresSink::new(conn_string, table).with_retry(policy);
+                inner.write_postgres_sink(sink);
+            } else {
+                inner.write_postgres(conn_string, table);
+            }
         }
         Ok(slf.unbind())
     }
@@ -570,10 +586,18 @@ impl PyPipeline {
     /// environment variables.
     fn read_s3(slf: Bound<'_, Self>, bucket_url: &str, key: &str) -> PyResult<Py<Self>> {
         let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
+        let retry = slf.borrow().take_retry()?;
         {
             let cell = slf.borrow_mut();
             let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
-            inner.read_s3(bucket_url, key, &creds).map_err(to_pyerr)?;
+            if let Some(policy) = retry {
+                let store = tpt_stream_core::S3Store::new(bucket_url, &creds)
+                    .map_err(to_pyerr)?
+                    .with_retry(policy);
+                inner.read_s3_store(store, key);
+            } else {
+                inner.read_s3(bucket_url, key, &creds).map_err(to_pyerr)?;
+            }
         }
         Ok(slf.unbind())
     }
@@ -581,10 +605,18 @@ impl PyPipeline {
     /// Write results to an S3 (or S3-compatible) object (env credentials).
     fn write_s3(slf: Bound<'_, Self>, bucket_url: &str, key: &str) -> PyResult<Py<Self>> {
         let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
+        let retry = slf.borrow().take_retry()?;
         {
             let cell = slf.borrow_mut();
             let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
-            inner.write_s3(bucket_url, key, &creds).map_err(to_pyerr)?;
+            if let Some(policy) = retry {
+                let store = tpt_stream_core::S3Store::new(bucket_url, &creds)
+                    .map_err(to_pyerr)?
+                    .with_retry(policy);
+                inner.write_s3_store(store, key);
+            } else {
+                inner.write_s3(bucket_url, key, &creds).map_err(to_pyerr)?;
+            }
         }
         Ok(slf.unbind())
     }
@@ -594,10 +626,18 @@ impl PyPipeline {
     /// `AWS_SECRET_ACCESS_KEY`).
     fn read_gcs(slf: Bound<'_, Self>, bucket: &str, key: &str) -> PyResult<Py<Self>> {
         let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
+        let retry = slf.borrow().take_retry()?;
         {
             let cell = slf.borrow_mut();
             let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
-            inner.read_gcs(bucket, key, &creds).map_err(to_pyerr)?;
+            if let Some(policy) = retry {
+                let store = tpt_stream_core::GcsStore::new(bucket, &creds)
+                    .map_err(to_pyerr)?
+                    .with_retry(policy);
+                inner.read_gcs_store(store, key);
+            } else {
+                inner.read_gcs(bucket, key, &creds).map_err(to_pyerr)?;
+            }
         }
         Ok(slf.unbind())
     }
@@ -605,10 +645,18 @@ impl PyPipeline {
     /// Write results to a Google Cloud Storage object (env credentials).
     fn write_gcs(slf: Bound<'_, Self>, bucket: &str, key: &str) -> PyResult<Py<Self>> {
         let creds = tpt_stream_core::CloudCredentials::from_env().map_err(to_pyerr)?;
+        let retry = slf.borrow().take_retry()?;
         {
             let cell = slf.borrow_mut();
             let mut inner = cell.inner.lock().map_err(|_| lock_err())?;
-            inner.write_gcs(bucket, key, &creds).map_err(to_pyerr)?;
+            if let Some(policy) = retry {
+                let store = tpt_stream_core::GcsStore::new(bucket, &creds)
+                    .map_err(to_pyerr)?
+                    .with_retry(policy);
+                inner.write_gcs_store(store, key);
+            } else {
+                inner.write_gcs(bucket, key, &creds).map_err(to_pyerr)?;
+            }
         }
         Ok(slf.unbind())
     }
@@ -622,8 +670,12 @@ impl PyPipeline {
         key: &str,
     ) -> PyResult<Py<Self>> {
         let creds = tpt_stream_core::AzureCredentials::from_env().map_err(to_pyerr)?;
-        let store = tpt_stream_core::AzureBlobStore::new(account_url, container, &creds)
+        let retry = slf.borrow().take_retry()?;
+        let mut store = tpt_stream_core::AzureBlobStore::new(account_url, container, &creds)
             .map_err(to_pyerr)?;
+        if let Some(policy) = retry {
+            store = store.with_retry(policy);
+        }
         {
             let cell = slf.borrow_mut();
             cell.inner
@@ -642,8 +694,12 @@ impl PyPipeline {
         key: &str,
     ) -> PyResult<Py<Self>> {
         let creds = tpt_stream_core::AzureCredentials::from_env().map_err(to_pyerr)?;
-        let store = tpt_stream_core::AzureBlobStore::new(account_url, container, &creds)
+        let retry = slf.borrow().take_retry()?;
+        let mut store = tpt_stream_core::AzureBlobStore::new(account_url, container, &creds)
             .map_err(to_pyerr)?;
+        if let Some(policy) = retry {
+            store = store.with_retry(policy);
+        }
         {
             let cell = slf.borrow_mut();
             cell.inner
@@ -660,6 +716,64 @@ impl PyPipeline {
         {
             let cell = slf.borrow_mut();
             cell.inner.lock().map_err(|_| lock_err())?.read_http(url);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Pass through only the first `n` rows (pipeline `LIMIT`).
+    fn limit(slf: Bound<'_, Self>, n: usize) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner.lock().map_err(|_| lock_err())?.limit(n);
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Capture rows a *stage* rejects in `path` (CSV) instead of aborting the
+    /// run; `dead_letter_rows()` reports how many were captured. Not supported
+    /// with stateful stages (aggregate/sort/dedup/join/expect).
+    fn dead_letter(slf: Bound<'_, Self>, path: &str) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .dead_letter(path)
+                .map_err(to_pyerr)?;
+        }
+        Ok(slf.unbind())
+    }
+
+    /// Rows captured by the dead-letter queue so far (0 if none is attached).
+    fn dead_letter_rows(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .dead_letter_rows()
+    }
+
+    /// Retry policy for the *next* network source/sink (S3/GCS/Azure/
+    /// Postgres). `attempts` counts total tries, so `1` disables retrying
+    /// (the default). `base_delay_ms`/`max_delay_ms` are milliseconds; the
+    /// delay doubles per retry, with jitter, up to the cap. Only transient
+    /// failures retry — transport errors and 408/429/5xx.
+    ///
+    /// Call it before the corresponding `read_*`/`write_*`:
+    /// `Pipeline().with_retry(3).read_s3(url, key)`
+    #[pyo3(signature = (attempts, base_delay_ms=100, max_delay_ms=10000))]
+    fn with_retry(
+        slf: Bound<'_, Self>,
+        attempts: u32,
+        base_delay_ms: u64,
+        max_delay_ms: u64,
+    ) -> PyResult<Py<Self>> {
+        {
+            let cell = slf.borrow_mut();
+            *cell.retry.lock().map_err(|_| lock_err())? = Some(RetryPolicy::new(
+                attempts,
+                std::time::Duration::from_millis(base_delay_ms),
+                std::time::Duration::from_millis(max_delay_ms),
+            ));
         }
         Ok(slf.unbind())
     }

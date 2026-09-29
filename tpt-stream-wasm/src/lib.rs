@@ -378,8 +378,9 @@ impl Engine {
     }
 
     /// GROUP BY `group_by` with aggregate specs. `fns[i]` applies to
-    /// `columns[i]`; the set of `fns` is: sum, avg, count, count_all (column
-    /// may be empty), min, max. Output columns are named `{fn}_{column}`.
+    /// `columns[i]`; the set of `fns` is: sum, avg, count, count_all, min, max.
+    /// Output columns are named `{fn}_{column}`, except `count_all`, which takes
+    /// no input column (pass `""`) and is always named `count_all`.
     pub fn aggregate(
         &mut self,
         group_by: Vec<String>,

@@ -94,6 +94,74 @@ fn avg_min_max_count_column() {
 }
 
 #[test]
+fn distinct_collapses_duplicate_projections() {
+    let out = run_to_csv("SELECT DISTINCT region FROM 'IN_CSV'");
+    let mut lines: Vec<&str> = out.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines, vec!["north", "region", "south", "west"]);
+}
+
+#[test]
+fn distinct_ignores_columns_left_out_of_the_projection() {
+    // `product` repeats across regions, so a DISTINCT on (region, product)
+    // keeps both north rows; the point is that `amount` is not part of the key.
+    let out = run_to_csv("SELECT DISTINCT region, product FROM 'IN_CSV'");
+    let mut lines: Vec<&str> = out.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        vec![
+            "north,gadget",
+            "north,widget",
+            "region,product",
+            "south,gadget",
+            "west,widget"
+        ]
+    );
+
+    // Same query without DISTINCT keeps the duplicate.
+    let out = run_to_csv("SELECT region, product FROM 'IN_CSV'");
+    assert_eq!(out.lines().count(), 6);
+}
+
+#[test]
+fn distinct_star_compares_whole_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = dir.path().join("dupes.csv");
+    write(&csv_path, "a,b\n1,x\n1,x\n1,y\n2,x\n");
+    let mut pipeline = build_sql_pipeline(&format!(
+        "SELECT DISTINCT * FROM '{}'",
+        csv_path.to_string_lossy()
+    ))
+    .unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let out = tpt_stream_core::source::batches_to_csv(&rt.block_on(pipeline.collect()).unwrap());
+    assert_eq!(out, "a,b\n1,x\n1,y\n2,x\n");
+}
+
+#[test]
+fn distinct_composes_with_where_order_by_and_limit() {
+    let out = run_to_csv(
+        "SELECT DISTINCT product FROM 'IN_CSV' WHERE amount > 0 ORDER BY product DESC LIMIT 1",
+    );
+    assert_eq!(out, "product\nwidget\n");
+}
+
+#[test]
+fn distinct_with_group_by_is_not_doubled_up() {
+    // GROUP BY already collapses on its keys; the DISTINCT must not add a second
+    // (pointless) dedup pass that would also change the row order.
+    let out =
+        run_to_csv("SELECT DISTINCT region, SUM(amount) AS total FROM 'IN_CSV' GROUP BY region");
+    let mut lines: Vec<&str> = out.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines, vec!["north,60", "region,total", "south,5", "west,0"]);
+}
+
+#[test]
 fn unsupported_sql_is_rejected_clearly() {
     let err = build_sql_pipeline("UPDATE t SET a = 1")
         .map(|_: tpt_stream_core::Pipeline| ())
@@ -115,4 +183,23 @@ fn unsupported_sql_is_rejected_clearly() {
     .map(|_: tpt_stream_core::Pipeline| ())
     .unwrap_err();
     assert!(err.to_string().contains("unsupported"), "{err}");
+}
+
+#[test]
+fn hostile_nesting_is_an_error_not_a_stack_overflow() {
+    let deep_parens = format!(
+        "SELECT a FROM 'x.csv' WHERE {}1{}",
+        "(".repeat(50_000),
+        ")".repeat(50_000)
+    );
+    assert!(build_sql_pipeline(&deep_parens).is_err());
+    let deep_neg = format!("SELECT a FROM 'x.csv' WHERE {}1", "-".repeat(50_000));
+    assert!(build_sql_pipeline(&deep_neg).is_err());
+    let deep_not = format!("SELECT a FROM 'x.csv' WHERE {}b", "NOT ".repeat(50_000));
+    assert!(build_sql_pipeline(&deep_not).is_err());
+    let long_chain = format!(
+        "SELECT a FROM 'x.csv' WHERE {}",
+        vec!["b = 1"; 5_000].join(" AND ")
+    );
+    assert!(build_sql_pipeline(&long_chain).is_err());
 }

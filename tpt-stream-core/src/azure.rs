@@ -38,10 +38,20 @@ const API_VERSION: &str = "2021-08-06";
 
 /// Azure Storage account credentials: the account name plus its shared key
 /// (base64-encoded 256-bit key, from *Access keys* in the portal).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AzureCredentials {
     pub account: String,
     pub key: String,
+}
+
+// Manual `Debug` so `{:?}`, panics, and `unwrap()` messages never print the key.
+impl std::fmt::Debug for AzureCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureCredentials")
+            .field("account", &self.account)
+            .field("key", &"***")
+            .finish()
+    }
 }
 
 impl AzureCredentials {
@@ -352,13 +362,7 @@ fn query_string(query: &[(&str, &str)]) -> String {
 fn http_error(op: &str, key: &str, err: crate::httpclient::Error) -> Error {
     match err {
         crate::httpclient::Error::Status(code, response) => {
-            let reason = response
-                .into_string()
-                .map(|body| {
-                    let snippet: String = body.chars().take(200).collect();
-                    format!("status {code}: {snippet}")
-                })
-                .unwrap_or_else(|_| format!("status {code}"));
+            let reason = format!("status {code}: {}", response.error_snippet());
             Error::Cloud(format!("{op} {key:?}: {reason}"))
         }
         crate::httpclient::Error::Transport(t) => {
@@ -596,6 +600,14 @@ impl crate::sink::Sink for AzureBlobSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_debug_redacts_key() {
+        let c = AzureCredentials::new("acct", "c2VjcmV0a2V5");
+        let shown = format!("{c:?}");
+        assert!(shown.contains("acct"));
+        assert!(!shown.contains("c2VjcmV0a2V5"), "{shown}");
+    }
 
     #[test]
     fn rfc1123_format_matches_spec() {
