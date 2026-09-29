@@ -1,7 +1,22 @@
 # tpt-streamforge development recipes. Run with `just <recipe>` (https://github.com/casey/just)
 
+# Virtualenv layout differs per OS: Scripts/*.exe on Windows, bin/* elsewhere.
+venv_bin := if os_family() == "windows" { ".venv/Scripts" } else { ".venv/bin" }
+exe      := if os_family() == "windows" { ".exe" } else { "" }
+python   := if os_family() == "windows" { "python" } else { "python3" }
+
 default:
     @just --list
+
+# One-time developer setup: virtualenv + maturin/pytest, wasm target, JS deps.
+# Needs Rust (rustup), Python 3.9+ and Node 22 already installed.
+setup:
+    {{python}} -m venv .venv
+    {{venv_bin}}/python{{exe}} -m pip install --upgrade pip maturin pytest
+    rustup target add wasm32-unknown-unknown
+    cargo install wasm-pack --locked
+    cd tpt-stream-wasm/browser && npm ci
+    @echo "Setup complete. Try: just ci, just pytest, just jstest"
 
 # Format all Rust code
 fmt:
@@ -26,11 +41,11 @@ bench:
 
 # Build the Python wheel into the local virtualenv
 py:
-    .venv/Scripts/maturin.exe develop -m tpt-stream-py/Cargo.toml
+    {{venv_bin}}/maturin{{exe}} develop -m tpt-stream-py/Cargo.toml
 
 # Run the Python test suite
 pytest: py
-    .venv/Scripts/python.exe -m pytest tpt-stream-py/python/tests -q
+    {{venv_bin}}/python{{exe}} -m pytest tpt-stream-py/python/tests -q
 
 # Build the Node and browser wasm packages
 wasm:
@@ -41,6 +56,10 @@ wasm:
 jstest: wasm
     cd tpt-stream-wasm/node && npm test
     cd tpt-stream-wasm/browser && npm ci && npm test
+
+# RustSec advisory scan (needs `cargo install cargo-audit --locked`)
+audit:
+    cargo audit
 
 # Everything CI checks, in one command
 ci: fmt clippy deny test

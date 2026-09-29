@@ -26,12 +26,52 @@ use tpt_stream_core::agg::AggSpec;
 use tpt_stream_core::httpclient::RetryPolicy;
 use tpt_stream_core::join::JoinType;
 use tpt_stream_core::source::ErrorPolicy;
-use tpt_stream_core::{Check, Pipeline};
+use tpt_stream_core::{Check, DataType, Pipeline, Value};
 
 create_exception!(tpt_streamforge, TptError, PyException);
 
 fn to_pyerr(err: tpt_stream_core::Error) -> PyErr {
     TptError::new_err(err.to_string())
+}
+
+fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    use pyo3::types::PyBool;
+    if obj.is_none() {
+        return Ok(Value::Null);
+    }
+    if let Ok(b) = obj.cast::<PyBool>() {
+        return Ok(Value::Bool(b.is_true()));
+    }
+    if let Ok(i) = obj.extract::<i64>() {
+        return Ok(Value::Int64(i));
+    }
+    if let Ok(f) = obj.extract::<f64>() {
+        return Ok(Value::Float64(f));
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(Value::Utf8(s));
+    }
+    Err(TptError::new_err(
+        "expect: one_of values must be int, float, str, bool or None",
+    ))
+}
+
+fn parse_data_type(name: &str) -> PyResult<DataType> {
+    Ok(match name.to_ascii_lowercase().as_str() {
+        "int32" => DataType::Int32,
+        "int64" | "int" => DataType::Int64,
+        "float32" => DataType::Float32,
+        "float64" | "float" => DataType::Float64,
+        "utf8" | "str" | "string" => DataType::Utf8,
+        "bool" | "boolean" => DataType::Bool,
+        "date" => DataType::Date,
+        "timestamp" => DataType::Timestamp,
+        other => {
+            return Err(TptError::new_err(format!(
+                "unknown type {other:?} (expected int32|int64|float32|float64|utf8|bool|date|timestamp)"
+            )))
+        }
+    })
 }
 
 fn lock_err() -> PyErr {
@@ -729,6 +769,35 @@ impl PyPipeline {
         Ok(slf.unbind())
     }
 
+    /// Keep a deterministic `fraction` (0..=1) of rows, chosen by a stable hash
+    /// of `key` columns and `seed`: same input and seed give the same sample,
+    /// and rows sharing a key are kept or dropped together.
+    #[pyo3(signature = (fraction, key, seed=0))]
+    fn sample(
+        slf: Bound<'_, Self>,
+        fraction: f64,
+        key: Vec<String>,
+        seed: u64,
+    ) -> PyResult<Py<Self>> {
+        if !(0.0..=1.0).contains(&fraction) {
+            return Err(TptError::new_err("sample: fraction must be within [0, 1]"));
+        }
+        if key.is_empty() {
+            return Err(TptError::new_err(
+                "sample: at least one key column is required",
+            ));
+        }
+        {
+            let cell = slf.borrow_mut();
+            let cols: Vec<&str> = key.iter().map(String::as_str).collect();
+            cell.inner
+                .lock()
+                .map_err(|_| lock_err())?
+                .sample(fraction, &cols, seed);
+        }
+        Ok(slf.unbind())
+    }
+
     /// Capture rows a *stage* rejects in `path` (CSV) instead of aborting the
     /// run; `dead_letter_rows()` reports how many were captured. Not supported
     /// with stateful stages (aggregate/sort/dedup/join/expect).
@@ -790,14 +859,28 @@ impl PyPipeline {
     }
 
     /// Attach data-quality checks: `rows_at_least`, `rows_at_most`,
-    /// `no_nulls=[cols]`, `unique=[cols]`. A violation aborts `execute()`.
-    #[pyo3(signature = (rows_at_least=None, rows_at_most=None, no_nulls=None, unique=None))]
+    /// `no_nulls=[cols]`, `unique=[cols]`, `ranges={col: (min, max)}` (either
+    /// bound may be `None`), `one_of={col: [allowed, ...]}` and
+    /// `types={col: "int64"}`. A violation aborts `execute()`.
+    #[pyo3(signature = (
+        rows_at_least=None,
+        rows_at_most=None,
+        no_nulls=None,
+        unique=None,
+        ranges=None,
+        one_of=None,
+        types=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn expect(
         slf: Bound<'_, Self>,
         rows_at_least: Option<u64>,
         rows_at_most: Option<u64>,
         no_nulls: Option<Vec<String>>,
         unique: Option<Vec<String>>,
+        ranges: Option<Bound<'_, PyDict>>,
+        one_of: Option<Bound<'_, PyDict>>,
+        types: Option<Bound<'_, PyDict>>,
     ) -> PyResult<Py<Self>> {
         let mut checks: Vec<Check> = Vec::new();
         if let Some(n) = rows_at_least {
@@ -811,6 +894,29 @@ impl PyPipeline {
         }
         for col in unique.unwrap_or_default() {
             checks.push(Check::Unique(col));
+        }
+        if let Some(ranges) = ranges {
+            for (col, bounds) in ranges.iter() {
+                let (min, max): (Option<f64>, Option<f64>) = bounds.extract().map_err(|_| {
+                    TptError::new_err("expect: ranges values must be (min, max) pairs")
+                })?;
+                checks.push(Check::range(col.extract::<String>()?, min, max));
+            }
+        }
+        if let Some(one_of) = one_of {
+            for (col, allowed) in one_of.iter() {
+                let mut values = Vec::new();
+                for item in allowed.try_iter()? {
+                    values.push(py_to_value(&item?)?);
+                }
+                checks.push(Check::one_of(col.extract::<String>()?, values));
+            }
+        }
+        if let Some(types) = types {
+            for (col, name) in types.iter() {
+                let dtype = parse_data_type(&name.extract::<String>()?)?;
+                checks.push(Check::of_type(col.extract::<String>()?, dtype));
+            }
         }
         if checks.is_empty() {
             return Err(TptError::new_err("expect: no checks given"));

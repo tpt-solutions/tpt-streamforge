@@ -1,9 +1,17 @@
 name: Release
 
+# TODO(F11): pin every `uses:` to a full commit SHA (`uses: owner/repo@<sha> # vN`).
+# Tags are mutable; resolve SHAs with `gh api repos/OWNER/REPO/commits/TAG --jq .sha`
+# (or pinact/Dependabot) rather than typing them by hand.
+
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+
+# Least privilege by default; jobs that need more declare it themselves.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,7 +34,7 @@ jobs:
         with:
           command: build
           working-directory: tpt-stream-py
-          args: --release --out dist
+          args: --release --locked --out dist
       - name: Run pytest on the wheel
         shell: bash
         run: |
@@ -39,6 +47,85 @@ jobs:
         with:
           name: wheels-${{ matrix.os }}
           path: tpt-stream-py/dist/*.whl
+
+  binaries:
+    name: tptforge binary (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  archive: tar.gz }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      archive: tar.gz }
+          - { os: macos-latest,   target: x86_64-apple-darwin,       archive: tar.gz }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    archive: zip }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --locked --release -p tpt-stream-cli --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="tptforge-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          bin=tptforge
+          [ "${{ matrix.archive }}" = zip ] && bin=tptforge.exe
+          cp "target/${{ matrix.target }}/release/$bin" "dist/$name/"
+          cp LICENSE-MIT LICENSE-APACHE tpt-stream-cli/README.md "dist/$name/"
+          cd dist
+          if [ "${{ matrix.archive }}" = zip ]; then
+            7z a -tzip "$name.zip" "$name" >/dev/null
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -rf "$name"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/*
+
+  github-release:
+    name: GitHub release (checksums + provenance + SBOM)
+    needs: [binaries, quality]
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the release and upload assets
+      id-token: write     # sign the attestation
+      attestations: write # store the attestation
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: bin-*
+          merge-multiple: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --all-features
+          # cargo-cyclonedx's output filename varies by version; take whatever it wrote for the CLI crate.
+          sbom=$(find tpt-stream-cli -maxdepth 1 -name '*.cyclonedx.json' | head -n1)
+          test -n "$sbom"
+          cp "$sbom" "dist/tptforge-${GITHUB_REF_NAME}.cyclonedx.json"
+      - name: Ship the installers
+        run: cp install.sh install.ps1 dist/
+      - name: SHA256SUMS
+        working-directory: dist
+        run: sha256sum tptforge-* > SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
 
   quality:
     name: Release quality gates
@@ -55,8 +142,9 @@ jobs:
     # so publishing needs manual approval.
     environment: release
     runs-on: ubuntu-latest
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    permissions:
+      contents: read
+      id-token: write # npm --provenance signs via GitHub OIDC
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -67,7 +155,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        run: cargo install wasm-pack --locked --version 0.13.1
       - name: Build Node wasm package
         run: wasm-pack build --target nodejs --out-dir node/pkg
         working-directory: tpt-stream-wasm
@@ -75,8 +163,10 @@ jobs:
         run: npm test
         working-directory: tpt-stream-wasm/node
       - name: Publish Node package
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         working-directory: tpt-stream-wasm/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Build browser wasm package
         run: wasm-pack build --target bundler --out-dir browser/pkg
         working-directory: tpt-stream-wasm
@@ -84,8 +174,10 @@ jobs:
         run: npm ci && npm test
         working-directory: tpt-stream-wasm/browser
       - name: Publish browser package
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         working-directory: tpt-stream-wasm/browser
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   docker:
     name: Publish container image (GHCR)

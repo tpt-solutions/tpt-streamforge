@@ -5,7 +5,12 @@
 #   tptforge run examples/pipeline.toml
 #
 # Reads examples/input.csv and writes examples/report.csv (paths are relative
-# to the directory you run from).
+# to tpt-stream-cli/, the crate root).
+#
+# This is a *feature tour*, not a second copy of templates/pipeline-starter:
+# it shows the stages that only the CLI exposes as a top-level key
+# (`limit`, `dead_letter`). The starter template is the minimal scaffold to copy
+# into a new project; this one is here to be read for reference.
 
 error_policy = "strict"
 
@@ -30,7 +35,11 @@ aggregate = { group_by = ["region"], aggs = { gross = "sum", "*" = "count_all" }
 sort = { columns = ["sum_gross"], descending = true }
 
 [[stages]]
-select = ["region", "sum_gross", "count_all"]
+# CLI-only stages:
+# `limit` keeps the first N rows; `dead_letter` writes rows a stage rejects to
+# a CSV instead of aborting the run (it cannot be combined with aggregate/sort/
+# dedup/join/expect, which carry state across batches).
+limit = 20
 
 [sink.csv]
 path = "examples/report.csv"

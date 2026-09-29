@@ -310,7 +310,7 @@ def test_shipped_type_stub_matches_the_runtime_api():
     for name in [
         "read_csv", "write_csv", "filter", "map", "select", "sort", "dedup",
         "join_csv", "group_by", "limit", "dead_letter", "dead_letter_rows",
-        "with_retry", "expect", "on_error", "on_progress", "execute",
+        "with_retry", "expect", "sample", "on_error", "on_progress", "execute",
         "collect", "to_pandas", "preview", "explain", "stage_stats",
         "read_s3", "write_s3", "read_gcs", "write_gcs", "read_azure",
         "write_azure", "read_postgres", "write_postgres", "read_sqlite",
@@ -320,3 +320,54 @@ def test_shipped_type_stub_matches_the_runtime_api():
         assert f"def {name}(" in stub, f"{name} missing from _native.pyi"
     # PEP 561 marker must ship alongside it.
     assert (importlib.resources.files(tpt_streamforge) / "py.typed").is_file()
+
+
+def _run_expect(tmp_path, csv, **checks):
+    src = tmp_path / "c.csv"
+    write_text(src, csv)
+    return (
+        Pipeline()
+        .read_csv(str(src))
+        .expect(**checks)
+        .write_csv(str(tmp_path / "o.csv"))
+        .execute()
+    )
+
+
+def test_expect_range_one_of_and_type(tmp_path):
+    ok = "\n".join(["id,status,score", "1,a,0.5", "2,b,1.5", "3,a,", ""])
+    _run_expect(tmp_path, ok, ranges={"score": (0, 2)}, one_of={"status": ["a", "b"]},
+                types={"id": "int32", "status": "utf8"})
+    _run_expect(tmp_path, ok, ranges={"id": (1, None)})
+
+    with pytest.raises(TptError, match="out of range"):
+        _run_expect(tmp_path, ok, ranges={"score": (None, 1.0)})
+    with pytest.raises(TptError, match="not allowed"):
+        _run_expect(tmp_path, ok, one_of={"status": ["a"]})
+    with pytest.raises(TptError, match="has type"):
+        _run_expect(tmp_path, ok, types={"id": "utf8"})
+    with pytest.raises(TptError, match="unknown type"):
+        _run_expect(tmp_path, ok, types={"id": "wat"})
+
+
+def test_sample_is_deterministic_and_roughly_the_fraction(tmp_path):
+    src = tmp_path / "big.csv"
+    n = 20000
+    write_text(src, "\n".join(["id,v"] + [f"{i},{i}" for i in range(n)] + [""]))
+
+    def sampled(fraction, seed):
+        return {
+            r["id"]
+            for r in Pipeline().read_csv(str(src)).sample(fraction, ["id"], seed=seed).collect()
+        }
+
+    a = sampled(0.25, 7)
+    assert a == sampled(0.25, 7)
+    assert a != sampled(0.25, 8)
+    assert abs(len(a) / n - 0.25) < 0.02
+    assert sampled(0.0, 1) == set()
+    assert len(sampled(1.0, 1)) == n
+    with pytest.raises(TptError):
+        Pipeline().read_csv(str(src)).sample(1.5, ["id"])
+    with pytest.raises(TptError):
+        Pipeline().read_csv(str(src)).sample(0.5, [])

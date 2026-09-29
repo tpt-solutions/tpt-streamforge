@@ -1,0 +1,27 @@
+{
+    "version": "0.1.0",
+    "description": "TOML-driven streaming ETL pipelines (tpt-streamforge CLI)",
+    "homepage": "https://github.com/tpt-solutions/tpt-streamforge",
+    "license": "MIT OR Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/tpt-solutions/tpt-streamforge/releases/download/v0.1.0/tptforge-v0.1.0-x86_64-pc-windows-msvc.zip",
+            "hash": "REPLACE_WITH_SHA256_FROM_SHA256SUMS",
+            "extract_dir": "tptforge-v0.1.0-x86_64-pc-windows-msvc"
+        }
+    },
+    "bin": "tptforge.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/tpt-solutions/tpt-streamforge/releases/download/v$version/tptforge-v$version-x86_64-pc-windows-msvc.zip",
+                "extract_dir": "tptforge-v$version-x86_64-pc-windows-msvc"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/SHA256SUMS",
+            "regex": "$sha256\\s+$basename"
+        }
+    }
+}

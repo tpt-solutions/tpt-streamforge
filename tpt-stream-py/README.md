@@ -127,7 +127,14 @@ standard `AWS_*` / `AZURE_*` environment variables).
 - `.join_csv(right_path, left_keys, right_keys, join_type="inner")` — hash
   join against a CSV build side (`inner`/`left`/`right`)
 - `.expect(rows_at_least=…, rows_at_most=…, no_nulls=[…], unique=[…])` —
-  data-quality gate; violations abort `execute()`
+  data-quality gate; violations abort `execute()`. Also
+  `ranges={"age": (0, 120)}` (either bound may be `None`; nulls skipped),
+  `one_of={"status": ["a", "b"]}` and `types={"id": "int32"}` (`int32`, `int64`,
+  `float32`, `float64`, `utf8`, `bool`, `date`, `timestamp`)
+- `.sample(fraction, key=[�], seed=0)` � deterministic keyed sampling: keeps
+  rows whose stable hash of the `key` columns plus `seed` falls below
+  `fraction`. Same input and seed give the same sample; rows sharing a key are
+  kept or dropped together
 - `.on_error("strict" | "skip" | "quarantine:<path>")` — malformed-row policy
 - `.dead_letter(path)` — capture rows a *stage* rejects into a CSV instead of
   aborting the run; `.dead_letter_rows()` reports the count. The queue file gets

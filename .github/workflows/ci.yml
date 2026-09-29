@@ -1,10 +1,18 @@
 name: CI
 
+# TODO(F11): pin every `uses:` to a full commit SHA (`uses: owner/repo@<sha> # vN`).
+# Tags below are mutable; resolve SHAs with `gh api repos/OWNER/REPO/commits/TAG --jq .sha`
+# (or Dependabot/pinact) and never hand-type them.
+
 on:
   push:
     branches: [master]
   pull_request:
   workflow_dispatch:
+
+# Least privilege: jobs that need more (none today) must request it themselves.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,12 +30,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --workspace --all-features --exclude tpt-streamforge
+        run: cargo build --locked --workspace --all-features --exclude tpt-streamforge
       - name: Test
-        run: cargo test --workspace --all-features --exclude tpt-streamforge
+        run: cargo test --locked --workspace --all-features --exclude tpt-streamforge
       - name: C ABI integration test
-        if: runner.os != 'Windows'
-        run: cargo test -p tpt-stream-ffi --test c_integration -- --ignored
+        # Runs on every OS. It needs a C compiler: Unix images ship one, and
+        # windows-latest ships MinGW-w64 (gcc + dlltool, which the test uses to
+        # synthesize the import library rustc does not emit). If no compiler is
+        # present the test prints SKIPPED and passes rather than failing.
+        run: cargo test --locked -p tpt-stream-ffi --test c_integration -- --ignored --nocapture
 
   python:
     name: Python (maturin)
@@ -46,7 +57,7 @@ jobs:
         with:
           command: build
           working-directory: tpt-stream-py
-          args: --release --out dist
+          args: --release --locked --out dist
       - name: Run pytest
         shell: bash
         run: |
@@ -82,7 +93,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test
-        run: cargo test -p tpt-stream-core --features postgres --test postgres
+        run: cargo test --locked -p tpt-stream-core --features postgres --test postgres
         env:
           TPT_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
 
@@ -128,7 +139,7 @@ jobs:
           svc.create_container("tpt-test")
           EOF
       - name: Test
-        run: cargo test -p tpt-stream-core --features "s3,gcs,azure" --test cloud
+        run: cargo test --locked -p tpt-stream-core --features "s3,gcs,azure" --test cloud
         env:
           TPT_TEST_S3_ENDPOINT: http://127.0.0.1:4566
           TPT_TEST_S3_BUCKET: tpt-test
@@ -178,7 +189,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Lint
-        run: cargo clippy --workspace --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-features -- -D warnings
 
   js:
     name: JS/WASM
@@ -192,7 +203,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # Built from source with the lockfile instead of piping an installer to sh.
+        run: cargo install wasm-pack --locked --version 0.13.1
       - name: Build Node wasm package
         run: wasm-pack build --target nodejs --out-dir node/pkg
         working-directory: tpt-stream-wasm
@@ -205,3 +217,29 @@ jobs:
       - name: Test browser wrapper (webpack harness)
         run: npm ci && npm test
         working-directory: tpt-stream-wasm/browser
+
+  audit:
+    name: cargo audit (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit Cargo.lock
+        run: cargo audit
+
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: Generate SBOMs
+        run: cargo cyclonedx --format json --all-features
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: "**/*.cyclonedx.json"

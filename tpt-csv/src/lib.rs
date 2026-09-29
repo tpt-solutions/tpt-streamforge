@@ -36,6 +36,6 @@ mod writer;
 pub use columnar::{ColumnarChunk, ColumnarReader, RaggedRowPolicy};
 pub use error::{Error, Result};
 pub use parallel::{find_chunk_boundaries, first_record_end, ChunkBoundary};
-pub use reader::{Position, Reader, ReaderBuilder};
+pub use reader::{Position, Reader, ReaderBuilder, DEFAULT_MAX_RECORD_BYTES};
 pub use record::StringRecord;
 pub use writer::{Writer, WriterBuilder};

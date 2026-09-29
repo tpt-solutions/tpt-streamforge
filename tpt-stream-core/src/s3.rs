@@ -402,7 +402,14 @@ pub(crate) fn cloud_read(
     chunk_rows: usize,
 ) {
     match store.read_object(key) {
-        Ok(body) => decode_object_stream(tx, body, format, chunk_rows, &Default::default()),
+        Ok(body) => decode_object_stream(
+            tx,
+            body,
+            format,
+            chunk_rows,
+            &Default::default(),
+            &Default::default(),
+        ),
         Err(e) => {
             let _ = tx.send(Err(e));
         }

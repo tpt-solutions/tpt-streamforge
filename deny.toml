@@ -40,29 +40,37 @@ unknown-git = "deny"
 
 [advisories]
 yanked = "deny"
+# Ignored advisories, re-verified 2026-09-29 (`cargo tree -i <crate>` and
+# `cargo deny check advisories`). Each has a review-by date: on or after it,
+# re-run both, check whether rustls-rustcrypto has a newer release, and either
+# drop the entry or extend the date with a fresh justification.
+#
 # rustls-rustcrypto 0.0.2-alpha (our pure-Rust, MIT/Apache-2.0 crypto
 # provider for rustls, chosen over `ring`'s OpenSSL-derived/Apache-2.0-only
-# license — see the `http`/`s3`/`azure` features in tpt-stream-core) pins
+# license -- see the `http`/`s3`/`azure` features in tpt-stream-core) pins
 # rustls-webpki 0.102.8, paste 1.0.15, and rsa 0.9.10 with no newer release
 # to update to (last published 2024-04-24; still the crate's only release).
-# Ignored here because none is reachable through how we use it:
+# `ring` opt-in was considered and rejected (Apache-2.0-only).
 ignore = [
     # `paste` is a transitive macro-only build dependency of the RustCrypto
     # crates rustls-rustcrypto composes (aes-gcm, ed25519-dalek, p256, ...);
     # no runtime attack surface, unmaintained status only.
-    "RUSTSEC-2024-0436",
-    # The following four are all rustls-webpki 0.102.8 advisories reachable
-    # only via a misissued CA cert (wildcard/URI name constraints) or CRL
-    # parsing; we use webpki solely to verify server certs on outbound TLS
-    # connections to configured S3/GCS/Azure endpoints and never parse CRLs.
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
-    "RUSTSEC-2026-0049",
-    "RUSTSEC-2026-0098",
+    { id = "RUSTSEC-2024-0436", reason = "proc-macro only, unmaintained; review by 2026-12-29" },
+    # The following four are rustls-webpki 0.102.8 advisories (misissued-CA
+    # name constraints, CRL parsing). Verified: `cargo tree -i
+    # rustls-webpki@0.102.8` shows the only dependent is rustls-rustcrypto,
+    # which imports just the `alg_id` signature-algorithm constants from it.
+    # Certificate path validation, name checking and CRL handling all run in
+    # rustls' own rustls-webpki 0.103.x (patched), so the vulnerable 0.102.8
+    # verification code is never called.
+    { id = "RUSTSEC-2026-0099", reason = "webpki 0.102.8 only supplies alg_id constants; validation uses 0.103.x; review by 2026-12-29" },
+    { id = "RUSTSEC-2026-0104", reason = "webpki 0.102.8 only supplies alg_id constants; validation uses 0.103.x; review by 2026-12-29" },
+    { id = "RUSTSEC-2026-0049", reason = "webpki 0.102.8 only supplies alg_id constants; validation uses 0.103.x; review by 2026-12-29" },
+    { id = "RUSTSEC-2026-0098", reason = "webpki 0.102.8 only supplies alg_id constants; validation uses 0.103.x; review by 2026-12-29" },
     # Marvin Attack timing side-channel in rsa 0.9.10, with no patched
     # version released upstream. Only exploitable against code holding and
     # operating on an RSA private key; we only use rsa to verify RSA
-    # signatures on server certs during the TLS handshake, never to hold or
-    # operate on a private key.
-    "RUSTSEC-2023-0071",
+    # signatures on server certs during the TLS handshake (public-key
+    # operations), never to hold or operate on a private key.
+    { id = "RUSTSEC-2023-0071", reason = "public-key verification only, no private key use; no upstream fix; review by 2026-12-29" },
 ]

@@ -6,6 +6,9 @@ Per-package history. The workspace-wide log lives in the
 ## [Unreleased]
 
 ### Added
+- `Pipeline.expect(ranges=…, one_of=…, types=…)` data-contract checks and
+  `Pipeline.sample(fraction, key, seed=0)` deterministic keyed sampling
+  (typed in `_native.pyi`, covered by pytest).
 - Full engine surface on `Pipeline`: `select`, `join_csv`,
   `read_jsonl`, `read_json`, `read_columnar`, `write_jsonl`, `write_json`,
   `write_columnar`, `read_sqlite`/`write_sqlite`,

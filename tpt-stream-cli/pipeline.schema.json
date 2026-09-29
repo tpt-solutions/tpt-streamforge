@@ -1,0 +1,556 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "aggregate": {
+      "additionalProperties": false,
+      "properties": {
+        "aggs": {
+          "additionalProperties": {
+            "enum": [
+              "sum",
+              "avg",
+              "count",
+              "count_all",
+              "min",
+              "max"
+            ]
+          },
+          "description": "{column: fn}; use the key \"*\" with count_all for a row count.",
+          "type": "object"
+        },
+        "group_by": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0,
+          "type": "array"
+        }
+      },
+      "required": [
+        "group_by"
+      ],
+      "type": "object"
+    },
+    "azureObject": {
+      "additionalProperties": false,
+      "properties": {
+        "account_url": {
+          "type": "string"
+        },
+        "container": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_url",
+        "container",
+        "key"
+      ],
+      "type": "object"
+    },
+    "columnarSink": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "use_zstd": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "connectionQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "connection": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "query"
+      ],
+      "type": "object"
+    },
+    "connectionTable": {
+      "additionalProperties": false,
+      "properties": {
+        "connection": {
+          "type": "string"
+        },
+        "table": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "table"
+      ],
+      "type": "object"
+    },
+    "expect": {
+      "additionalProperties": false,
+      "properties": {
+        "no_nulls": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0,
+          "type": "array"
+        },
+        "one_of": {
+          "additionalProperties": {
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean"
+              ]
+            },
+            "type": "array"
+          },
+          "description": "{column: [allowed values]}.",
+          "type": "object"
+        },
+        "ranges": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "max": {
+                "type": "number"
+              },
+              "min": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "description": "{column: {min, max}} inclusive numeric bounds.",
+          "type": "object"
+        },
+        "rows_at_least": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows_at_most": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "types": {
+          "additionalProperties": {
+            "enum": [
+              "int32",
+              "int64",
+              "float32",
+              "float64",
+              "utf8",
+              "bool",
+              "date",
+              "timestamp"
+            ]
+          },
+          "description": "{column: type name}.",
+          "type": "object"
+        },
+        "unique": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0,
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "fileSource": {
+      "additionalProperties": false,
+      "properties": {
+        "chunk_rows": {
+          "description": "Rows per batch (default 65536).",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "gcsObject": {
+      "additionalProperties": false,
+      "properties": {
+        "bucket": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bucket",
+        "key"
+      ],
+      "type": "object"
+    },
+    "join": {
+      "additionalProperties": false,
+      "properties": {
+        "left_keys": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "right": {
+          "description": "Right-hand CSV file.",
+          "type": "string"
+        },
+        "right_keys": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "type": {
+          "enum": [
+            "inner",
+            "left",
+            "right"
+          ]
+        }
+      },
+      "required": [
+        "right",
+        "left_keys",
+        "right_keys",
+        "type"
+      ],
+      "type": "object"
+    },
+    "jsonSink": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "pretty": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "pathOrTable": {
+      "description": "A path string, or a table with `path` (and optional `chunk_rows`).",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "chunk_rows": {
+              "description": "Rows per batch (default 65536).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "s3Object": {
+      "additionalProperties": false,
+      "properties": {
+        "bucket_url": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bucket_url",
+        "key"
+      ],
+      "type": "object"
+    },
+    "sample": {
+      "additionalProperties": false,
+      "properties": {
+        "fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "key": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "seed": {
+          "default": 0,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fraction",
+        "key"
+      ],
+      "type": "object"
+    },
+    "sink": {
+      "additionalProperties": false,
+      "description": "Exactly one sink kind.",
+      "maxProperties": 1,
+      "minProperties": 1,
+      "properties": {
+        "azure": {
+          "$ref": "#/definitions/azureObject"
+        },
+        "columnar": {
+          "$ref": "#/definitions/columnarSink"
+        },
+        "csv": {
+          "$ref": "#/definitions/pathOrTable"
+        },
+        "gcs": {
+          "$ref": "#/definitions/gcsObject"
+        },
+        "json": {
+          "$ref": "#/definitions/jsonSink"
+        },
+        "jsonl": {
+          "$ref": "#/definitions/pathOrTable"
+        },
+        "postgres": {
+          "$ref": "#/definitions/connectionTable"
+        },
+        "s3": {
+          "$ref": "#/definitions/s3Object"
+        },
+        "sqlite": {
+          "$ref": "#/definitions/sqliteSink"
+        }
+      },
+      "type": "object"
+    },
+    "sort": {
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "descending": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "columns"
+      ],
+      "type": "object"
+    },
+    "source": {
+      "additionalProperties": false,
+      "description": "Exactly one source kind.",
+      "maxProperties": 1,
+      "minProperties": 1,
+      "properties": {
+        "azure": {
+          "$ref": "#/definitions/azureObject"
+        },
+        "columnar": {
+          "$ref": "#/definitions/pathOrTable"
+        },
+        "csv": {
+          "$ref": "#/definitions/fileSource"
+        },
+        "gcs": {
+          "$ref": "#/definitions/gcsObject"
+        },
+        "http": {
+          "$ref": "#/definitions/pathOrTable"
+        },
+        "json": {
+          "$ref": "#/definitions/fileSource"
+        },
+        "jsonl": {
+          "$ref": "#/definitions/fileSource"
+        },
+        "postgres": {
+          "$ref": "#/definitions/connectionQuery"
+        },
+        "s3": {
+          "$ref": "#/definitions/s3Object"
+        },
+        "sqlite": {
+          "$ref": "#/definitions/sqliteSource"
+        }
+      },
+      "type": "object"
+    },
+    "sqliteSink": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "table": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "table"
+      ],
+      "type": "object"
+    },
+    "sqliteSource": {
+      "additionalProperties": false,
+      "properties": {
+        "chunk_rows": {
+          "description": "Rows per batch (default 65536).",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "query"
+      ],
+      "type": "object"
+    },
+    "stage": {
+      "additionalProperties": false,
+      "description": "Exactly one stage kind.",
+      "maxProperties": 1,
+      "minProperties": 1,
+      "properties": {
+        "aggregate": {
+          "$ref": "#/definitions/aggregate"
+        },
+        "dedup": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0,
+          "type": "array"
+        },
+        "expect": {
+          "$ref": "#/definitions/expect"
+        },
+        "filter": {
+          "description": "Row expression; keep rows where true.",
+          "type": "string"
+        },
+        "join": {
+          "$ref": "#/definitions/join"
+        },
+        "limit": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "{output_column: expression}; replaces the schema.",
+          "type": "object"
+        },
+        "sample": {
+          "$ref": "#/definitions/sample"
+        },
+        "select": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "sort": {
+          "$ref": "#/definitions/sort"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "description": "A tptforge pipeline file. String values may use ${VAR} / ${VAR:-default}; write $${ for a literal ${.",
+  "properties": {
+    "dead_letter": {
+      "description": "CSV file receiving rows a stage rejects.",
+      "type": "string"
+    },
+    "error_policy": {
+      "anyOf": [
+        {
+          "enum": [
+            "strict",
+            "skip"
+          ]
+        },
+        {
+          "pattern": "^quarantine:.+"
+        }
+      ],
+      "description": "strict | skip | quarantine:<path>",
+      "type": "string"
+    },
+    "sink": {
+      "$ref": "#/definitions/sink"
+    },
+    "source": {
+      "$ref": "#/definitions/source"
+    },
+    "stages": {
+      "items": {
+        "$ref": "#/definitions/stage"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "source"
+  ],
+  "title": "tptforge pipeline",
+  "type": "object"
+}

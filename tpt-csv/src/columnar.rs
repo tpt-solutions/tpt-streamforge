@@ -100,9 +100,16 @@ pub struct ColumnarReader<R> {
 impl<R: Read> ColumnarReader<R> {
     /// Build from a raw reader. The first record is consumed as the header row.
     pub fn from_reader(reader: R) -> Result<Self> {
+        Self::from_reader_with_max_record_bytes(reader, crate::reader::DEFAULT_MAX_RECORD_BYTES)
+    }
+
+    /// Like [`from_reader`](Self::from_reader) with an explicit cap on the size
+    /// of any single record (see [`ReaderBuilder::max_record_bytes`]).
+    pub fn from_reader_with_max_record_bytes(reader: R, max_record_bytes: usize) -> Result<Self> {
         let mut reader = ReaderBuilder::new()
             .has_headers(true)
             .flexible(true)
+            .max_record_bytes(max_record_bytes)
             .from_reader(reader);
         let headers = reader.headers()?.clone();
         let num_columns = headers.len();
@@ -210,6 +217,39 @@ mod tests {
         let mut policy = RaggedRowPolicy::Strict;
         cr.read_chunk_into(64, &mut policy, &mut chunk).unwrap();
         chunk
+    }
+
+    #[test]
+    fn oversized_record_is_an_error() {
+        // Unterminated quote: without a cap this would buffer all the input.
+        let mut csv = String::from(
+            "a,b
+1,\"",
+        );
+        csv.push_str(&"x".repeat(300_000));
+        let mut cr =
+            ColumnarReader::from_reader_with_max_record_bytes(csv.as_bytes(), 1024).unwrap();
+        let mut chunk = ColumnarChunk::new(2, 8);
+        let mut policy = RaggedRowPolicy::Strict;
+        let err = cr.read_chunk_into(8, &mut policy, &mut chunk).unwrap_err();
+        assert!(
+            matches!(err, Error::RecordTooLarge { limit: 1024, .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn oversized_header_is_an_error() {
+        let csv = format!(
+            "{}
+1
+",
+            "h".repeat(200_000)
+        );
+        assert!(matches!(
+            ColumnarReader::from_reader_with_max_record_bytes(csv.as_bytes(), 1024),
+            Err(Error::RecordTooLarge { .. })
+        ));
     }
 
     #[test]

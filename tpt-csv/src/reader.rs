@@ -20,13 +20,18 @@ impl Position {
 pub struct ReaderBuilder {
     has_headers: bool,
     start_line: u64,
+    max_record_bytes: usize,
 }
+
+/// Default cap on the size of a single record (all its fields together): 16 MiB.
+pub const DEFAULT_MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 
 impl Default for ReaderBuilder {
     fn default() -> Self {
         ReaderBuilder {
             has_headers: true,
             start_line: 1,
+            max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
         }
     }
 }
@@ -62,8 +67,20 @@ impl ReaderBuilder {
         self
     }
 
+    /// Longest single record (all fields, after unquoting) the reader will
+    /// buffer before failing with [`Error::RecordTooLarge`]. Defaults to
+    /// [`DEFAULT_MAX_RECORD_BYTES`] (16 MiB). Without a cap, an unterminated
+    /// quoted field makes the reader buffer the whole remaining input. The
+    /// check runs once per 64 KiB buffer refill, so the limit may be exceeded
+    /// by up to one buffer before it trips.
+    pub fn max_record_bytes(&mut self, max: usize) -> &mut Self {
+        self.max_record_bytes = max;
+        self
+    }
+
     pub fn from_reader<R: Read>(&self, reader: R) -> Reader<R> {
         Reader {
+            max_record_bytes: self.max_record_bytes,
             inner: BufReader::with_capacity(64 * 1024, reader),
             has_headers: self.has_headers,
             headers: None,
@@ -85,6 +102,7 @@ pub struct Reader<R> {
     has_headers: bool,
     headers: Option<StringRecord>,
     line: u64,
+    max_record_bytes: usize,
 }
 
 impl<R: Read> Reader<R> {
@@ -234,6 +252,12 @@ impl<R: Read> Reader<R> {
                 cells.push((field_start, arena.len() - field_start));
                 return Ok(true);
             }
+            if arena.len() > self.max_record_bytes {
+                return Err(Error::RecordTooLarge {
+                    line: start_line,
+                    limit: self.max_record_bytes,
+                });
+            }
         }
     }
 
@@ -337,6 +361,12 @@ impl<R: Read> Reader<R> {
             if record_done {
                 push_field(record, field, start_line)?;
                 return Ok(true);
+            }
+            if field.len() + record.data_len() > self.max_record_bytes {
+                return Err(Error::RecordTooLarge {
+                    line: start_line,
+                    limit: self.max_record_bytes,
+                });
             }
         }
     }

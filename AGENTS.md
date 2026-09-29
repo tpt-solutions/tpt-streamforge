@@ -11,7 +11,8 @@ just test            # cargo test --workspace --all-features --exclude tpt-strea
 just clippy          # cargo clippy --workspace --all-features -- -D warnings
 just deny            # cargo deny check licenses bans sources
 just bench           # criterion benches in tpt-stream-core
-just py              # maturin develop + pytest (Windows path: .venv/Scripts/...)
+just setup           # one-time: venv, maturin, wasm target, JS deps (cross-platform)
+just py              # maturin develop into .venv (path is OS-aware)
 just jstest          # wasm-pack build both targets, then npm test both
 ```
 

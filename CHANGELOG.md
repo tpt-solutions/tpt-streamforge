@@ -4,9 +4,37 @@ All notable changes to tpt-streamforge are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - Unreleased
+
+> Everything below ships together in the first release. It is not tagged yet:
+> per the release process in `AGENTS.md`, tagging `v0.1.0` is a deliberate
+> manual step because it triggers the PyPI and npm publish workflow. Replace
+> this heading with the release date when the tag is pushed.
 
 ### Added
+
+- **Data contracts, keyed sampling, typed FFI handles** — `expect` gains
+  `Range` / `OneOf` / `Type` checks (Rust `Check::range/one_of/of_type`; Python
+  `expect(ranges=…, one_of=…, types=…)`); new deterministic `Pipeline::sample
+  (fraction, &keys, seed)` stage (Python `.sample(fraction, key, seed=0)`); the C
+  header now uses distinct opaque `TptPipeline *` / `TptRecordBatch *` handle
+  types instead of `void *` (F24 follow-up). The WASM bindings do not expose
+  `expect`, so nothing changed there.
+
+- **`tptforge` authoring & ops tooling** — `${VAR}` / `${VAR:-default}`
+  substitution in pipeline string values (F22; `$${` escapes a literal `${`;
+  unset variables are an error naming the variable and line); pipeline errors now
+  carry `line L, column C`, the stage index and a did-you-mean hint, and every
+  spec struct rejects unknown fields; new `validate`, `explain` and
+  `run --dry-run`; `schema-json` plus a checked-in, freshness-tested
+  `pipeline.schema.json` for editor autocomplete; `completions <shell>` and `man`
+  (`clap_complete` / `clap_mangen`, both MIT-compatible); `init`, `doctor`,
+  `convert`, `run --watch`; `schema --save` / `--against` (exit 2 on drift);
+  `diff A B --key id` (external sort + merge pass); `run --manifest FILE`
+  provenance JSON (counts, per-stage stats, SHA-256 of spec and local
+  inputs/outputs). Checkpoint/resume is deliberately not included.
+
+- **Release & supply-chain tooling** — `release.yml` builds `tptforge` for Linux x64, macOS arm64/x64 and Windows x64, and publishes them with `SHA256SUMS`, a build-provenance attestation, a CycloneDX SBOM and `install.sh` / `install.ps1` (checksum-verified). `[package.metadata.binstall]` for `cargo binstall`, Scoop/Homebrew templates in `packaging/`, `cargo audit` and SBOM jobs in CI, `.devcontainer/`, and a cross-platform `just setup` (the justfile no longer hardcodes `.venv/Scripts`).
 
 - **Per-row dead-letter queue** — `Pipeline::dead_letter(path)` captures rows a
   *stage* rejects to a CSV file instead of aborting the run, so a long job
@@ -162,7 +190,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **CI** — Dependabot config, a Docker image build job, and publish jobs
   moved into a protected `release` GitHub Environment.
 
+### Security
+
+- **Input-size caps (F1 follow-up, F14)** - gzip output is capped at 64 GiB
+  (decompression bombs), and CSV records, JSONL lines and JSON-array elements at
+  16 MiB, for file, HTTP and cloud sources; exceeding a cap is an error. Both are
+  configurable through the new `SourceLimits` (`CsvSource::with_limits`,
+  `JsonlSource::with_limits`, `JsonArraySource::open_with_limits`,
+  `HttpSource::with_limits`). The HTTP client gained `Agent::with_max_body` and
+  `HttpSource::with_max_body`. `tpt-csv` gained `ReaderBuilder::max_record_bytes`
+  and `Error::RecordTooLarge`.
+- **Azure/GCS/SQLite/TLS hardening (F18-F20, F10)** - Azure blob keys are
+  percent-encoded in the URL and the signed resource (keys with `?`, `#`, `%`,
+  spaces or CR/LF no longer corrupt or split requests; `.`/`..` segments and NUL
+  are rejected); GCS bucket names are validated against the naming rules; the
+  SQLite source runs with `PRAGMA query_only=ON` and NUL in queries or
+  identifiers is rejected; TLS root-store loading reports native-certificate
+  errors, fails with an actionable message when no roots are available, and
+  accepts an extra CA bundle (`TPT_EXTRA_CA_BUNDLE` or `Agent::with_ca_bundle`).
+  `deny.toml` advisory ignores were re-verified (the vulnerable
+  `rustls-webpki 0.102.8` only supplies algorithm-id constants; certificate
+  validation uses 0.103.x) and now carry review-by dates.
+- **PostgreSQL plaintext refusal (F2)** - the PostgreSQL source and sink connect
+  without TLS, so they now refuse non-loopback TCP hosts unless
+  `TPT_ALLOW_INSECURE_POSTGRES=1` is set (e.g. when tunnelling). Native TLS
+  support is not included.
+
 ### Fixed
+
+- **CI/release hardening (F11/F12)** — top-level `permissions: contents: read`; `NPM_TOKEN` scoped to the publish steps with `npm publish --provenance`; `--locked` builds; wasm-pack built from source instead of `curl | sh`; the container image runs as a non-root user and builds with `--locked`. Action SHA pinning and image digests remain TODO (marked in the files).
 
 - **Ragged CSV rows no longer corrupt data silently** — a row with the wrong
   field count previously shifted the column arena, mangling every following
@@ -219,9 +275,82 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   available) and none reachable through our client-only TLS usage — see
   the comments in `deny.toml` for the per-advisory rationale.
 
-## [0.1.0] - placeholder
+### Added
+- **`SELECT DISTINCT` in the SQL frontend** — `tptforge sql` now supports
+  `DISTINCT`, deduping on the *projected* columns, so
+  `SELECT DISTINCT region, product` keeps two `north` rows that differ in
+  `product`, while `SELECT DISTINCT *` compares whole rows. It runs after
+  `WHERE` and before `ORDER BY`/`LIMIT`, and is skipped when `GROUP BY` is
+  present (which already collapses the keys). The Postgres-style
+  `DISTINCT ON (...)` is still rejected.
+- **Python `limit` and the stage-level dead-letter queue** —
+  `Pipeline.limit(n)`, `Pipeline.dead_letter(path)`, and
+  `Pipeline.dead_letter_rows()`. The queue is deliberately rejected with stateful
+  stages, because isolating a bad row would re-run them over a subset of their
+  input.
+- **Python `with_retry(attempts, base_delay_ms, max_delay_ms)`** — opt-in
+  retry/backoff for S3, GCS, Azure, and PostgreSQL. It is *one-shot*: consumed by
+  the next network `read_*`/`write_*`, so a policy cannot silently leak onto a
+  later source. Only transient failures retry (transport errors, 408/429/5xx);
+  the default is still no retry.
+- **PEP 561 typing for the Python package** — a hand-written
+  `tpt_streamforge/_native.pyi` and a `py.typed` marker, both shipped in the
+  sdist and the wheel, plus `[project.urls]` metadata and a `pandas` extra.
+  Editors and `mypy` now see the real API instead of an untyped extension
+  module.
+- **Pre-built-store pipeline methods** — `read_s3_store`, `write_s3_store`,
+  `read_gcs_store`, `write_gcs_store`, and `write_postgres_sink` take an already
+  configured store/sink, so a caller can apply options the shorthand has no
+  argument for (`with_retry`, and for Postgres `overwrite()`). `GcsStore` also
+  gained the `with_retry` it was missing.
+- **Fallible columnar APIs** — `try_push`, `try_set`, `try_append_column`,
+  `RecordBatch::try_append_rows`, and the `ColumnBuffer` equivalents return a
+  `TypeMismatch` (or `table::AppendError`) instead of panicking, for callers
+  whose types are not statically known — notably the untrusted `.tptcol` reader.
+  The original names remain as thin documented wrappers, because a type mismatch
+  there is a bug in the calling code rather than bad input.
 
-Initial engine work: streaming CSV/JSONL pipelines, filter/map/sort/dedup/
-aggregate/join, C FFI, and the PyO3 Python package.
+### Fixed
+- **Public-API `panic!`s on untrusted or untyped input** — the `.tptcol`
+  decoder and the columnar batch append path now report a mismatch as an error
+  instead of aborting the process, and the aggregate COUNT accumulator reports
+  an inconsistent variant as `Error::Other` naming what it found.
+- **Two CLI tests used TOML that could never parse** — `[source] csv = "..."`
+  only works for *sinks* (which accept a scalar path shorthand); a source needs
+  `[source.csv] path = "..."`.
+- **`spec.txt` described an API that does not exist** — the `csv` crate (now
+  in-house `tpt-csv`), a zero-copy FFI that was never built (`to_arrow` and the
+  11 `arrow` crates were removed for the licensing policy), configurable CSV
+  delimiters (fixed at `,`), 64-row/64 MB chunks (65,536 rows), a `Row`-mutating
+  `map` closure, and both the Python and JS "target API" snippets. The file is
+  now marked Implemented and defers to the per-crate READMEs.
+- **`count_all` output-column naming was documented vaguely and inconsistently.**
+  It genuinely differs per binding: Python names the output column after the
+  `agg()` dict key, WASM always emits `count_all`, and the CLI emits
+  `count_all` for the `"*"` key or `count_<col>` for a column key. All four
+  READMEs, both wasm `.d.ts` files, and the `aggregate` rustdoc now state the
+  exact rule and the difference.
+- **The Prometheus metrics endpoint is hardened (F13)** — request line capped at
+  8 KiB, headers at 100 lines / 16 KiB (over-limit requests get a `431`, not an
+  unbounded buffer), a 5 s per-connection deadline with 2 s read/write timeouts,
+  and **loopback-only by default**: `--metrics 0.0.0.0:9464` is now refused
+  unless you also pass `--metrics-allow-remote`, because the endpoint is
+  unauthenticated and would otherwise publish a job's row counts to the network.
+  Fixing this surfaced a genuine Windows bug — closing a socket that still has
+  unread request bytes queued sends an RST, which makes the peer discard a
+  response it already received — so reject paths now drain the remainder
+  (bounded) and the FIN is sent explicitly. That was also the cause of two
+  flaky tests; they are now 10/10 clean.
+- **The FFI C integration test is no longer excluded on Windows CI** —
+  `rustc` emits a `cdylib` but no import library, so the test synthesizes one
+  with `dlltool` (present in the `windows-latest` image) and links
+  `-ltpt_stream_ffi`. A missing compiler or `dlltool` prints
+  `SKIPPED <reason>` and passes, so a thin toolchain degrades to a documented
+  no-op instead of a red build.
+- **Repository hygiene** — removed a committed test log, a one-off patch script,
+  and a personal absolute path from `todo.md`. `tpt-stream-cli/examples/pipeline.toml`
+  is now explicitly a feature tour (it adds the `limit` stage) rather than a
+  near-duplicate of `templates/pipeline-starter/pipeline.toml`, with a test
+  guarding both against drift.
 
-[unreleased]: https://github.com/anomalyco/tpt-streamforge
+[0.1.0]: https://github.com/tpt-solutions/tpt-streamforge/releases/tag/v0.1.0

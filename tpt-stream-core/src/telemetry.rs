@@ -71,6 +71,7 @@ pub use tracing::Level;
 pub enum Level {
     DEBUG,
     INFO,
+    WARN,
 }
 
 #[macro_use]

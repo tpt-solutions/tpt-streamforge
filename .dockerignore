@@ -12,3 +12,7 @@ tpt-stream-wasm/browser/tests/dist/
 .github/
 **/*.log
 dist/
+.env
+.env.*
+.devcontainer/
+.kilo/

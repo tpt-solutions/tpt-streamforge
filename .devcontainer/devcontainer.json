@@ -1,0 +1,15 @@
+{
+  "name": "tpt-streamforge",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.13" },
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+  "postCreateCommand": "cargo install just cargo-deny cargo-audit --locked && just setup",
+  "containerEnv": { "CARGO_TERM_COLOR": "always" },
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml", "ms-python.python"]
+    }
+  }
+}

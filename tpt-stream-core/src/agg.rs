@@ -664,22 +664,30 @@ fn encode_key(values: &[Value]) -> String {
 
 fn hash_key(values: &[Value]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hasher;
     let mut h = DefaultHasher::new();
+    hash_values(values, &mut h);
+    h.finish()
+}
+
+/// Feed `values` into `h`. Shared by [`hash_key`] (process-local `DefaultHasher`,
+/// used for spill partitioning) and the sampling stage (a fixed-algorithm
+/// hasher, so its output is stable across runs and releases).
+pub(crate) fn hash_values<H: std::hash::Hasher>(values: &[Value], h: &mut H) {
+    use std::hash::Hash;
     for v in values {
         match v {
-            Value::Int32(x) => x.hash(&mut h),
-            Value::Int64(x) => x.hash(&mut h),
-            Value::Float32(x) => x.to_bits().hash(&mut h),
-            Value::Float64(x) => x.to_bits().hash(&mut h),
-            Value::Bool(x) => x.hash(&mut h),
-            Value::Utf8(s) => s.hash(&mut h),
-            Value::Date(x) => x.hash(&mut h),
-            Value::Timestamp(x) => x.hash(&mut h),
-            Value::Null => 0u8.hash(&mut h),
+            Value::Int32(x) => x.hash(h),
+            Value::Int64(x) => x.hash(h),
+            Value::Float32(x) => x.to_bits().hash(h),
+            Value::Float64(x) => x.to_bits().hash(h),
+            Value::Bool(x) => x.hash(h),
+            Value::Utf8(s) => s.hash(h),
+            Value::Date(x) => x.hash(h),
+            Value::Timestamp(x) => x.hash(h),
+            Value::Null => 0u8.hash(h),
         }
     }
-    h.finish()
 }
 
 // ---------------------------------------------------------------------------

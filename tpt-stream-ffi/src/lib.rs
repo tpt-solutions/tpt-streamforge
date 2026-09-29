@@ -11,8 +11,22 @@
 //!   code instead of unwinding across the FFI boundary.
 
 use std::ffi::{c_char, CStr, CString};
-use std::os::raw::{c_int, c_void};
+use std::os::raw::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+
+/// Opaque pipeline handle (`tpt_pipeline_new` / `tpt_pipeline_free`). Its
+/// layout is private; C sees only a forward-declared struct, so a batch
+/// handle cannot be passed where a pipeline is expected without a compiler
+/// diagnostic.
+pub struct TptPipeline {
+    _private: (),
+}
+
+/// Opaque record-batch handle (`tpt_record_batch_read` /
+/// `tpt_record_batch_free`). Layout is private; see [`TptPipeline`].
+pub struct TptRecordBatch {
+    _private: (),
+}
 
 /// Success.
 pub const TPT_OK: c_int = 0;
@@ -152,14 +166,14 @@ pub extern "C" fn tpt_last_error_code() -> c_int {
 /// # Safety
 /// `out` must be a valid non-null pointer.
 #[no_mangle]
-pub unsafe extern "C" fn tpt_pipeline_new(out: *mut *mut c_void) -> c_int {
+pub unsafe extern "C" fn tpt_pipeline_new(out: *mut *mut TptPipeline) -> c_int {
     catch_unwind(AssertUnwindSafe(|| {
         if out.is_null() {
             return TPT_ERR_INVALID_ARG;
         }
         let pipeline = Box::into_raw(Box::new(tpt_stream_core::Pipeline::new()));
         // SAFETY: out is valid and non-null.
-        *out = pipeline.cast::<c_void>();
+        *out = pipeline.cast::<TptPipeline>();
         TPT_OK
     }))
     .unwrap_or(TPT_ERR_PANIC)
@@ -170,7 +184,7 @@ pub unsafe extern "C" fn tpt_pipeline_new(out: *mut *mut c_void) -> c_int {
 /// # Safety
 /// `pipeline` must be a non-null handle from `tpt_pipeline_new` (or NULL).
 #[no_mangle]
-pub unsafe extern "C" fn tpt_pipeline_free(pipeline: *mut c_void) {
+pub unsafe extern "C" fn tpt_pipeline_free(pipeline: *mut TptPipeline) {
     if pipeline.is_null() {
         return;
     }
@@ -191,7 +205,7 @@ pub unsafe extern "C" fn tpt_pipeline_free(pipeline: *mut c_void) {
 /// `pipeline` must be a pipeline handle; `path` a valid C string.
 #[no_mangle]
 pub unsafe extern "C" fn tpt_pipeline_read_csv(
-    pipeline: *mut c_void,
+    pipeline: *mut TptPipeline,
     path: *const c_char,
     chunk_rows: usize,
 ) -> c_int {
@@ -218,7 +232,10 @@ pub unsafe extern "C" fn tpt_pipeline_read_csv(
 /// # Safety
 /// `pipeline` must be a pipeline handle; `expr` a valid C string.
 #[no_mangle]
-pub unsafe extern "C" fn tpt_pipeline_filter(pipeline: *mut c_void, expr: *const c_char) -> c_int {
+pub unsafe extern "C" fn tpt_pipeline_filter(
+    pipeline: *mut TptPipeline,
+    expr: *const c_char,
+) -> c_int {
     catch_unwind(AssertUnwindSafe(|| {
         let handle = unsafe { pipeline.cast::<tpt_stream_core::Pipeline>().as_mut() };
         let Some(handle) = handle else {
@@ -241,7 +258,7 @@ pub unsafe extern "C" fn tpt_pipeline_filter(pipeline: *mut c_void, expr: *const
 /// valid C strings.
 #[no_mangle]
 pub unsafe extern "C" fn tpt_pipeline_map(
-    pipeline: *mut c_void,
+    pipeline: *mut TptPipeline,
     columns: *const *const c_char,
     exprs: *const *const c_char,
     count: usize,
@@ -301,7 +318,7 @@ pub struct TptAggSpec {
 /// `spec_n` `TptAggSpec`.
 #[no_mangle]
 pub unsafe extern "C" fn tpt_pipeline_aggregate(
-    pipeline: *mut c_void,
+    pipeline: *mut TptPipeline,
     group_by: *const *const c_char,
     group_n: usize,
     specs: *const TptAggSpec,
@@ -383,7 +400,7 @@ pub unsafe extern "C" fn tpt_pipeline_aggregate(
 /// `columns` must be `count` valid C strings.
 #[no_mangle]
 pub unsafe extern "C" fn tpt_pipeline_sort(
-    pipeline: *mut c_void,
+    pipeline: *mut TptPipeline,
     columns: *const *const c_char,
     count: usize,
     descending: c_int,
@@ -422,7 +439,7 @@ pub unsafe extern "C" fn tpt_pipeline_sort(
 /// `pipeline` must be a pipeline handle; `path` a valid C string.
 #[no_mangle]
 pub unsafe extern "C" fn tpt_pipeline_write_csv(
-    pipeline: *mut c_void,
+    pipeline: *mut TptPipeline,
     path: *const c_char,
 ) -> c_int {
     catch_unwind(AssertUnwindSafe(|| {
@@ -444,7 +461,10 @@ pub unsafe extern "C" fn tpt_pipeline_write_csv(
 /// # Safety
 /// `pipeline` must be a pipeline handle; `rows_out` a valid pointer or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn tpt_pipeline_execute(pipeline: *mut c_void, rows_out: *mut u64) -> c_int {
+pub unsafe extern "C" fn tpt_pipeline_execute(
+    pipeline: *mut TptPipeline,
+    rows_out: *mut u64,
+) -> c_int {
     catch_unwind(AssertUnwindSafe(|| {
         let handle = unsafe { pipeline.cast::<tpt_stream_core::Pipeline>().as_mut() };
         let Some(handle) = handle else {
@@ -485,7 +505,7 @@ pub unsafe extern "C" fn tpt_pipeline_execute(pipeline: *mut c_void, rows_out: *
 #[no_mangle]
 pub unsafe extern "C" fn tpt_record_batch_read(
     path: *const c_char,
-    out: *mut *mut c_void,
+    out: *mut *mut TptRecordBatch,
 ) -> c_int {
     catch_unwind(AssertUnwindSafe(|| {
         let Some(path) = (unsafe { cstr(path) }) else {
@@ -514,7 +534,7 @@ pub unsafe extern "C" fn tpt_record_batch_read(
             return TPT_ERR_INVALID_ARG;
         }
         // SAFETY: caller guarantees a valid output pointer.
-        *out = Box::into_raw(Box::new(batch)).cast::<c_void>();
+        *out = Box::into_raw(Box::new(batch)).cast::<TptRecordBatch>();
         TPT_OK
     }))
     .unwrap_or(TPT_ERR_PANIC)
@@ -525,7 +545,7 @@ pub unsafe extern "C" fn tpt_record_batch_read(
 /// # Safety
 /// `batch` must be a non-null handle from `tpt_record_batch_read` (or NULL).
 #[no_mangle]
-pub unsafe extern "C" fn tpt_record_batch_free(batch: *mut c_void) {
+pub unsafe extern "C" fn tpt_record_batch_free(batch: *mut TptRecordBatch) {
     if batch.is_null() {
         return;
     }
@@ -541,7 +561,7 @@ pub unsafe extern "C" fn tpt_record_batch_free(batch: *mut c_void) {
 /// # Safety
 /// `batch` must be a batch handle or NULL (returns 0).
 #[no_mangle]
-pub unsafe extern "C" fn tpt_record_batch_num_rows(batch: *const c_void) -> u64 {
+pub unsafe extern "C" fn tpt_record_batch_num_rows(batch: *const TptRecordBatch) -> u64 {
     catch_unwind(AssertUnwindSafe(|| {
         let batch = unsafe { batch.cast::<tpt_stream_core::RecordBatch>().as_ref() };
         batch.map(|b| b.num_rows() as u64).unwrap_or(0)
@@ -554,7 +574,7 @@ pub unsafe extern "C" fn tpt_record_batch_num_rows(batch: *const c_void) -> u64 
 /// # Safety
 /// `batch` must be a batch handle or NULL (returns 0).
 #[no_mangle]
-pub unsafe extern "C" fn tpt_record_batch_num_columns(batch: *const c_void) -> u64 {
+pub unsafe extern "C" fn tpt_record_batch_num_columns(batch: *const TptRecordBatch) -> u64 {
     catch_unwind(AssertUnwindSafe(|| {
         let batch = unsafe { batch.cast::<tpt_stream_core::RecordBatch>().as_ref() };
         batch.map(|b| b.num_columns() as u64).unwrap_or(0)
@@ -569,7 +589,7 @@ pub unsafe extern "C" fn tpt_record_batch_num_columns(batch: *const c_void) -> u
 /// `batch` must be a batch handle; `buffer` writable for `capacity` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn tpt_record_batch_get_column(
-    batch: *const c_void,
+    batch: *const TptRecordBatch,
     column: usize,
     buffer: *mut c_char,
     capacity: usize,
@@ -610,7 +630,7 @@ pub unsafe extern "C" fn tpt_record_batch_get_column(
 /// `batch` must be a batch handle; `buffer` writable for `capacity` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn tpt_record_batch_get_cell(
-    batch: *const c_void,
+    batch: *const TptRecordBatch,
     row: usize,
     column: usize,
     buffer: *mut c_char,
@@ -678,8 +698,8 @@ mod tests {
             .into_owned()
     }
 
-    fn pipe() -> *mut c_void {
-        let mut h: *mut c_void = std::ptr::null_mut();
+    fn pipe() -> *mut TptPipeline {
+        let mut h: *mut TptPipeline = std::ptr::null_mut();
         let rc = unsafe { tpt_pipeline_new(&mut h) };
         assert_eq!(rc, TPT_OK);
         h
@@ -798,7 +818,7 @@ mod tests {
             writer.write_batch(&batch).unwrap();
             writer.finish().unwrap();
         }
-        let mut bh: *mut c_void = std::ptr::null_mut();
+        let mut bh: *mut TptRecordBatch = std::ptr::null_mut();
         let rc =
             unsafe { tpt_record_batch_read(CString::new(&tptcol[..]).unwrap().as_ptr(), &mut bh) };
         assert_eq!(rc, TPT_OK);

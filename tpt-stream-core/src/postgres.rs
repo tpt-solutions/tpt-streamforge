@@ -18,6 +18,49 @@ use tpt_stream_columnar::value::{date_to_string, timestamp_to_string};
 
 type BatchResult = std::result::Result<RecordBatch, Error>;
 
+/// Environment variable that permits plaintext connections to non-loopback
+/// PostgreSQL hosts (`1` or `true`).
+pub const ALLOW_INSECURE_ENV: &str = "TPT_ALLOW_INSECURE_POSTGRES";
+
+fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+/// This crate connects with `NoTls` (no TLS stack is linked for PostgreSQL,
+/// which keeps the dependency tree MIT-clean), so credentials and data would
+/// cross the network in the clear. Refuse any TCP host that is not loopback
+/// unless the caller opts in with `TPT_ALLOW_INSECURE_POSTGRES=1` -- for
+/// example when the database is only reachable over a private network, a VPN,
+/// or an SSH/stunnel tunnel terminating TLS. Unix-socket hosts are always fine.
+/// The error names only the host, never the connection string (it holds the
+/// password).
+#[allow(irrefutable_let_patterns)] // `Host::Unix` only exists on Unix targets
+fn check_transport(conn_string: &str) -> Result<()> {
+    let config: tokio_postgres::Config = conn_string
+        .parse()
+        .map_err(|e| Error::Database(format!("postgres connection string: {e}")))?;
+    let allowed = std::env::var(ALLOW_INSECURE_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if allowed {
+        return Ok(());
+    }
+    for host in config.get_hosts() {
+        if let tokio_postgres::config::Host::Tcp(h) = host {
+            if !is_loopback_host(h) {
+                return Err(Error::Database(format!(
+                    "refusing plaintext PostgreSQL connection to non-loopback host {h:?}: TLS is                      not supported, so credentials and data would be sent unencrypted; tunnel                      the connection (VPN/ssh/stunnel) and set {ALLOW_INSECURE_ENV}=1 to override"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn sql_type_name(data_type: DataType) -> &'static str {
     match data_type {
         DataType::Int32 => "INTEGER",
@@ -316,6 +359,7 @@ impl PostgresSink {
     }
 
     async fn connect(&mut self, batch: &RecordBatch) -> Result<()> {
+        check_transport(&self.conn_string)?;
         let (client, conn) = tokio_postgres::connect(&self.conn_string, tokio_postgres::NoTls)
             .await
             .map_err(|e| Error::Database(format!("postgres connect: {e}")))?;
@@ -533,6 +577,10 @@ fn postgres_read_loop(
             return;
         }
     };
+    if let Err(e) = check_transport(conn_string) {
+        let _ = tx.send(Err(e));
+        return;
+    }
     let (client, conn) =
         match runtime.block_on(tokio_postgres::connect(conn_string, tokio_postgres::NoTls)) {
             Ok(v) => v,
@@ -703,6 +751,47 @@ impl crate::source::Source for PostgresSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_hosts_are_allowed_without_tls() {
+        for url in [
+            "postgres://u:pw@localhost/db",
+            "postgres://u:pw@127.0.0.1:5432/db",
+            "postgres://u:pw@[::1]/db",
+            "host=localhost user=u",
+        ] {
+            assert!(check_transport(url).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn remote_hosts_are_refused_without_the_override() {
+        // Serialize env access with the override test below.
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(ALLOW_INSECURE_ENV);
+        for url in [
+            "postgres://u:secret@db.example.com/db",
+            "postgres://u:secret@10.1.2.3:5432/db",
+            "host=db.example.com user=u password=secret",
+            // One loopback host does not excuse a remote fallback host.
+            "postgres://u:secret@localhost,db.example.com/db",
+        ] {
+            let err = check_transport(url).unwrap_err().to_string();
+            assert!(err.contains("refusing plaintext"), "{url}: {err}");
+            assert!(!err.contains("secret"), "password leaked: {err}");
+        }
+    }
+
+    #[test]
+    fn override_env_allows_remote_hosts() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var(ALLOW_INSECURE_ENV, "1");
+        let ok = check_transport("postgres://u:pw@db.example.com/db").is_ok();
+        std::env::remove_var(ALLOW_INSECURE_ENV);
+        assert!(ok);
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn default_policy_is_one_immediate_reconnect() {

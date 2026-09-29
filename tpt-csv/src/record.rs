@@ -22,6 +22,11 @@ impl StringRecord {
         self.ends.push(self.data.len());
     }
 
+    /// Total bytes of field data held so far.
+    pub(crate) fn data_len(&self) -> usize {
+        self.data.len()
+    }
+
     pub fn clear(&mut self) {
         self.data.clear();
         self.ends.clear();

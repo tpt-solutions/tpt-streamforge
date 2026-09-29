@@ -26,6 +26,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -88,22 +89,97 @@ fn read_line_limited<R: BufRead>(reader: &mut R, line: &mut String) -> io::Resul
     Ok(n)
 }
 
-fn client_config() -> Arc<ClientConfig> {
-    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+/// Environment variable naming a PEM file of extra trusted root CAs (a
+/// corporate proxy or private CA), added on top of the OS trust store.
+pub const EXTRA_CA_BUNDLE_ENV: &str = "TPT_EXTRA_CA_BUNDLE";
+
+/// Build the root store from the OS certificates plus an optional PEM bundle.
+///
+/// Native-loader errors are logged (they are otherwise invisible, and are the
+/// usual reason a container has no roots). A store that ends up empty is a hard
+/// error: every TLS handshake would fail later with an opaque
+/// "unknown issuer", so fail here with a message that says what to fix.
+fn assemble_roots(
+    native: Vec<rustls::pki_types::CertificateDer<'static>>,
+    native_errors: &[String],
+    extra_bundle: Option<&Path>,
+) -> Result<RootCertStore, String> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::CertificateDer;
+
+    for err in native_errors {
+        let _ = err; // only read when the `tracing` feature is on
+        crate::trace_event!(
+            "tpt_stream_core::httpclient",
+            crate::telemetry::Level::WARN,
+            error = err.as_str(),
+            "failed to load a native root certificate"
+        );
+    }
+    let mut roots = RootCertStore::empty();
+    let mut native_rejected = 0usize;
+    for cert in native {
+        if roots.add(cert).is_err() {
+            native_rejected += 1;
+        }
+    }
+    if let Some(path) = extra_bundle {
+        let mut added = 0usize;
+        let iter = CertificateDer::pem_file_iter(path)
+            .map_err(|e| format!("cannot read CA bundle {}: {e}", path.display()))?;
+        for cert in iter {
+            let cert =
+                cert.map_err(|e| format!("invalid PEM in CA bundle {}: {e}", path.display()))?;
+            roots
+                .add(cert)
+                .map_err(|e| format!("invalid certificate in CA bundle {}: {e}", path.display()))?;
+            added += 1;
+        }
+        if added == 0 {
+            return Err(format!(
+                "CA bundle {} contains no certificates",
+                path.display()
+            ));
+        }
+    }
+    if roots.is_empty() {
+        let detail = if native_errors.is_empty() && native_rejected == 0 {
+            "the OS trust store is empty".to_string()
+        } else {
+            format!(
+                "{} native certificate error(s), {native_rejected} rejected; first: {}",
+                native_errors.len(),
+                native_errors.first().map_or("none", String::as_str)
+            )
+        };
+        return Err(format!(
+            "no trusted root certificates available for TLS ({detail}); install the OS CA \
+             certificates (e.g. ca-certificates), or set SSL_CERT_FILE or {EXTRA_CA_BUNDLE_ENV} \
+             to a PEM bundle"
+        ));
+    }
+    Ok(roots)
+}
+
+fn build_config(extra_bundle: Option<&Path>) -> Result<Arc<ClientConfig>, String> {
+    let result = rustls_native_certs::load_native_certs();
+    let errors: Vec<String> = result.errors.iter().map(|e| e.to_string()).collect();
+    let roots = assemble_roots(result.certs, &errors, extra_bundle)?;
+    let provider = Arc::new(rustls_rustcrypto::provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("tls protocol setup: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
+fn client_config() -> Result<Arc<ClientConfig>, String> {
+    static CONFIG: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
-            let mut roots = RootCertStore::empty();
-            let result = rustls_native_certs::load_native_certs();
-            for cert in result.certs {
-                let _ = roots.add(cert);
-            }
-            let provider = Arc::new(rustls_rustcrypto::provider());
-            let config = ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .expect("rustls-rustcrypto supports the default TLS protocol versions")
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            Arc::new(config)
+            let extra = std::env::var_os(EXTRA_CA_BUNDLE_ENV).filter(|v| !v.is_empty());
+            build_config(extra.as_deref().map(Path::new))
         })
         .clone()
 }
@@ -112,8 +188,11 @@ fn client_config() -> Arc<ClientConfig> {
 /// retry policy); each request opens its own TLS connection.
 #[derive(Clone)]
 pub struct Agent {
-    config: Arc<ClientConfig>,
+    /// `Err` holds why TLS could not be set up (e.g. no root certificates); it
+    /// is reported by the first `https://` request rather than by `new()`.
+    config: Result<Arc<ClientConfig>, String>,
     retry: RetryPolicy,
+    max_body: Option<u64>,
 }
 
 impl Agent {
@@ -121,7 +200,27 @@ impl Agent {
         Agent {
             config: client_config(),
             retry: RetryPolicy::default(),
+            max_body: None,
         }
+    }
+
+    /// Trust the PEM certificates in `path` in addition to the OS trust store
+    /// (the process-wide default can also be set with `TPT_EXTRA_CA_BUNDLE`).
+    #[must_use]
+    pub fn with_ca_bundle(mut self, path: impl AsRef<Path>) -> Self {
+        self.config = build_config(Some(path.as_ref()));
+        self
+    }
+
+    /// Cap every response body at `max` bytes. A larger `Content-Length` is
+    /// rejected before any body is read, and a body that turns out longer
+    /// (chunked, or a lying server) fails with `InvalidData` while streaming.
+    /// Unlimited by default, since sources legitimately stream large objects;
+    /// `into_string` always has its own 16 MiB cap.
+    #[must_use]
+    pub fn with_max_body(mut self, max: u64) -> Self {
+        self.max_body = Some(max);
+        self
     }
 
     /// Retry transient failures according to `policy`. Off by default.
@@ -300,6 +399,7 @@ impl<'a> RequestBuilder<'a> {
             &self.url,
             &self.headers,
             &[],
+            self.agent.max_body,
         )
     }
 
@@ -314,6 +414,7 @@ impl<'a> RequestBuilder<'a> {
             &self.url,
             &self.headers,
             body,
+            self.agent.max_body,
         )
     }
 }
@@ -325,17 +426,18 @@ impl<'a> RequestBuilder<'a> {
 /// for the idempotent requests the cloud modules issue (GET, PUT of a part,
 /// DELETE of an upload).
 fn execute_with_retry(
-    config: &Arc<ClientConfig>,
+    config: &Result<Arc<ClientConfig>, String>,
     policy: RetryPolicy,
     method: &str,
     url: &str,
     extra_headers: &[(String, String)],
     body: &[u8],
+    max_body: Option<u64>,
 ) -> Result<Response, Error> {
     let attempts = policy.attempts.max(1);
     let mut attempt = 1;
     loop {
-        match execute(config, method, url, extra_headers, body) {
+        match execute(config, method, url, extra_headers, body, max_body) {
             Ok(response) => return Ok(response),
             Err(err) => {
                 let status = match &err {
@@ -426,6 +528,7 @@ pub struct Response {
     status: u16,
     headers: Vec<(String, String)>,
     body: BodyInner,
+    max_body: Option<u64>,
 }
 
 enum BodyInner {
@@ -449,7 +552,15 @@ impl Response {
     }
 
     pub fn into_reader(self) -> Box<dyn Read + Send> {
-        Box::new(BodyReader { inner: self.body })
+        let reader = BodyReader { inner: self.body };
+        match self.max_body {
+            Some(max) => Box::new(crate::source::LimitedReader::new(
+                reader,
+                max,
+                "response body",
+            )),
+            None => Box::new(reader),
+        }
     }
 
     /// Up to 512 bytes of the body as lossy text, for error messages. Never
@@ -464,9 +575,10 @@ impl Response {
     pub fn into_string(self) -> Result<String, io::Error> {
         let mut reader = BodyReader { inner: self.body };
         let mut buf = String::new();
-        (&mut reader)
-            .take(MAX_STRING_BODY)
-            .read_to_string(&mut buf)?;
+        let cap = self
+            .max_body
+            .map_or(MAX_STRING_BODY, |m| m.min(MAX_STRING_BODY));
+        (&mut reader).take(cap).read_to_string(&mut buf)?;
         Ok(buf)
     }
 }
@@ -558,11 +670,12 @@ impl Read for BodyReader {
 }
 
 fn execute(
-    config: &Arc<ClientConfig>,
+    config: &Result<Arc<ClientConfig>, String>,
     method: &str,
     url_str: &str,
     extra_headers: &[(String, String)],
     body: &[u8],
+    max_body: Option<u64>,
 ) -> Result<Response, Error> {
     let url = url::Url::parse(url_str)
         .map_err(|e| Error::Transport(format!("invalid URL {url_str:?}: {e}")))?;
@@ -606,6 +719,9 @@ fn execute(
     let _ = tcp.set_write_timeout(Some(IO_TIMEOUT));
 
     let mut stream = if is_tls {
+        let config = config
+            .as_ref()
+            .map_err(|e| Error::Transport(format!("tls unavailable: {e}")))?;
         let server_name = ServerName::try_from(host.clone())
             .map_err(|e| Error::Transport(format!("invalid hostname {host:?}: {e}")))?;
         let conn = ClientConnection::new(config.clone(), server_name)
@@ -661,6 +777,14 @@ fn execute(
         ));
     }
 
+    if let (Some(max), Some(len)) = (max_body, content_length) {
+        if len > max && method != "HEAD" && (200..300).contains(&status) {
+            return Err(Error::Transport(format!(
+                "response body of {len} bytes exceeds the {max}-byte limit"
+            )));
+        }
+    }
+
     let body_inner = if method == "HEAD" {
         BodyInner::Empty
     } else if chunked {
@@ -675,6 +799,7 @@ fn execute(
         status,
         headers,
         body: body_inner,
+        max_body,
     };
     if !(200..300).contains(&status) {
         return Err(Error::Status(status, Box::new(response)));
@@ -948,6 +1073,65 @@ mod tests {
             .expect("request must be rejected")
             .to_string();
         assert!(err.contains("invalid header"), "{err}");
+    }
+
+    fn get_with_max(reply: &[u8], max: u64) -> Result<Vec<u8>, String> {
+        let url = serve_once(reply.to_vec());
+        let resp = Agent::new()
+            .with_max_body(max)
+            .get(&url)
+            .call()
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        resp.into_reader()
+            .read_to_end(&mut out)
+            .map_err(|e| e.to_string())?;
+        Ok(out)
+    }
+
+    #[test]
+    fn max_body_rejects_large_content_length_up_front() {
+        let err =
+            get_with_max(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nhello", 10).unwrap_err();
+        assert!(err.contains("exceeds the 10-byte limit"), "{err}");
+    }
+
+    #[test]
+    fn max_body_caps_chunked_stream() {
+        let err = get_with_max(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nc\r\nhello world!\r\n0\r\n\r\n",
+            5,
+        )
+        .unwrap_err();
+        assert!(err.contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn max_body_allows_body_of_exactly_the_limit() {
+        let body = get_with_max(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", 5).unwrap();
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn empty_root_store_fails_clearly() {
+        let err = assemble_roots(Vec::new(), &["boom".to_string()], None).unwrap_err();
+        assert!(err.contains("no trusted root certificates"), "{err}");
+        assert!(err.contains("boom"), "{err}");
+        assert!(err.contains(EXTRA_CA_BUNDLE_ENV), "{err}");
+    }
+
+    #[test]
+    fn extra_ca_bundle_errors_are_reported() {
+        let dir = std::env::temp_dir().join(format!("tpt-ca-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("nope.pem");
+        let err = assemble_roots(Vec::new(), &[], Some(&missing)).unwrap_err();
+        assert!(err.contains("cannot read CA bundle"), "{err}");
+        let empty = dir.join("empty.pem");
+        std::fs::write(&empty, "not a certificate\n").unwrap();
+        let err = assemble_roots(Vec::new(), &[], Some(&empty)).unwrap_err();
+        assert!(err.contains("no certificates"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

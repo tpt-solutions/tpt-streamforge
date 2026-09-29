@@ -6,6 +6,15 @@ the [root CHANGELOG](../CHANGELOG.md).
 ## [Unreleased]
 
 ### Added
+- **Data contracts** — `Check::Range { column, min, max }`, `Check::OneOf
+  { column, allowed }` and `Check::Type { column, expected }` in `expect.rs`
+  (constructors `Check::range` / `Check::one_of` / `Check::of_type`). Nulls are
+  skipped by `Range`/`OneOf` (pair with `NoNulls`); NaN fails `Range`. `Check`
+  no longer derives `Eq` (it now holds `f64`/`Value`).
+- **Deterministic keyed sampling** — `Pipeline::sample(fraction, &key_columns,
+  seed)` / `sample::Sample`: keeps a row when a stable hash (FNV-1a +
+  SplitMix64, via the shared `agg::hash_values`) of `(seed, key)` is below
+  `fraction`. Reproducible, independent of batching, key-consistent, stateless.
 - **Per-row dead-letter queue** — `Pipeline::dead_letter(path)` captures rows a
   *stage* rejects (a `map` returning the wrong width for one row, a failing
   expression) to a CSV file instead of aborting the run, so a long job finishes
@@ -60,6 +69,21 @@ the [root CHANGELOG](../CHANGELOG.md).
 - gzip source support and plain HTTP(S) URL sources.
 - Telemetry: stage names in `StageMetrics`, sink-row totals, tail-drain
   accounting.
+
+- **Input-size caps** - `SourceLimits` (record/line/element size, default
+  16 MiB; gzip decompressed output, default 64 GiB) applied by `CsvSource`,
+  `JsonlSource`, `JsonArraySource`, `HttpSource` and the cloud sources;
+  `with_limits` / `JsonArraySource::open_with_limits`, `HttpSource::with_max_body`,
+  `httpclient::Agent::with_max_body`.
+- TLS roots: `httpclient::Agent::with_ca_bundle` and `TPT_EXTRA_CA_BUNDLE`;
+  native-certificate errors are logged (`tracing`) and an empty root store is a
+  clear error instead of an opaque handshake failure.
+
+### Security
+- Azure blob keys are percent-encoded (and `.`/`..`/NUL rejected); GCS bucket
+  names are validated; SQLite source uses `PRAGMA query_only=ON` and rejects NUL
+  in queries/identifiers; PostgreSQL refuses plaintext connections to
+  non-loopback hosts unless `TPT_ALLOW_INSECURE_POSTGRES=1`.
 
 ### Fixed
 - Ragged CSV rows (wrong field count) aborted with a line-numbered schema

@@ -35,7 +35,7 @@ static int write_file(const char *path, const char *content) {
     return 0;
 }
 
-static int require_ok(int rc, void *pipeline) {
+static int require_ok(int rc, TptPipeline *pipeline) {
     if (rc == TPT_OK) return 0;
     char err[512];
     size_t written = 0;
@@ -54,7 +54,7 @@ static int run_suite(void) {
         FAIL("cannot write input");
     }
 
-    void *p = NULL;
+    TptPipeline *p = NULL;
     if (require_ok(tpt_pipeline_new(&p), p)) return 1;
 
     if (require_ok(tpt_pipeline_read_csv(p, input, 0), p)) return 1;

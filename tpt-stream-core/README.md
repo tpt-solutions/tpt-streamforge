@@ -14,7 +14,8 @@ Dual-licensed MIT / Apache-2.0.
 - **Stages**: `filter`, `map`, `select`, `sort` (external merge sort with
   spill), `dedup` (bloom filter + exact set), `aggregate` (hash GROUP BY
   with spill), `join` (hash join with build/probe), `expect` (data-quality
-  checks), `limit`.
+  checks: row bounds, `NoNulls`, `Unique`, `Range`, `OneOf`, `Type`), `limit`,
+  `sample` (deterministic keyed sampling: `Pipeline::sample(fraction, &keys, seed)`).
 - **Expression language** for filters and maps: comparisons, Kleene
   three-valued `and`/`or`/`not`, arithmetic, and `coalesce`, `abs`, `sqrt`,
   `min`, `max`, `upper`, `lower`, `length`, `trim`, `if` functions. Date

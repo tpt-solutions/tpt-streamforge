@@ -32,6 +32,8 @@ pub mod pipeline;
 pub mod postgres;
 pub mod row;
 #[cfg(feature = "async")]
+pub mod sample;
+#[cfg(feature = "async")]
 pub mod sink;
 #[cfg(feature = "async")]
 pub mod sort;
@@ -81,12 +83,14 @@ pub use row::Row;
 #[cfg(all(feature = "async", any(feature = "s3", feature = "gcs")))]
 pub use s3::{CloudCredentials, S3Sink, S3Source, S3Store};
 #[cfg(feature = "async")]
+pub use sample::Sample;
+#[cfg(feature = "async")]
 pub use sink::Sink;
 #[cfg(feature = "async")]
 pub use sort::Sort;
-pub use source::ErrorPolicy;
 #[cfg(feature = "async")]
 pub use source::Source;
+pub use source::{ErrorPolicy, SourceLimits};
 #[cfg(all(feature = "async", feature = "sqlite"))]
 pub use sqlite::{SqliteSink, SqliteSource};
 pub use table::RecordBatch;

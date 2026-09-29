@@ -33,6 +33,18 @@ anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 toml = "1"
 indicatif = "0.18"
-
-[dev-dependencies]
+serde_json = { workspace = true }
+sha2 = "0.11"
 tempfile = "3"
+clap_complete = "4"
+clap_mangen = "0.2"
+
+# `cargo binstall tpt-stream-cli` downloads the prebuilt archive from the GitHub
+# release (see .github/workflows/release.yml) instead of compiling.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/tptforge-v{ version }-{ target }.{ archive-format }"
+bin-dir = "tptforge-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"

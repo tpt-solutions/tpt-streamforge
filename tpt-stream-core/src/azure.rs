@@ -268,9 +268,17 @@ impl AzureBlobStore {
         (url, x_ms)
     }
 
+    /// `/{container}/{percent-encoded key}`: the path used both in the request
+    /// URL and in the Shared Key canonicalized resource (Azure signs the
+    /// *encoded* path). Rejects keys that could escape the container or corrupt
+    /// the request line.
+    fn blob_path(&self, key: &str) -> Result<String> {
+        Ok(format!("/{}/{}", self.container, encode_blob_key(key)?))
+    }
+
     /// `GET` a blob, returning a streaming reader over its body.
     pub fn read_object(&self, key: &str) -> Result<Box<dyn BufRead + Send>> {
-        let blob_path = format!("/{}/{}", self.container, key);
+        let blob_path = self.blob_path(key)?;
         let (url, headers) = self.request_parts("GET", &blob_path, &[], 0, &[]);
         let mut request = self.agent.get(&url);
         for (k, v) in &headers {
@@ -287,7 +295,7 @@ impl AzureBlobStore {
 
     /// `PUT` an in-memory payload as one block blob.
     pub fn write_object(&self, key: &str, payload: Vec<u8>) -> Result<()> {
-        let blob_path = format!("/{}/{}", self.container, key);
+        let blob_path = self.blob_path(key)?;
         let len = payload.len();
         let (url, headers) = self.request_parts(
             "PUT",
@@ -308,7 +316,7 @@ impl AzureBlobStore {
 
     /// Upload one block (`?comp=block`).
     pub(crate) fn put_block(&self, key: &str, block_id: &str, data: Vec<u8>) -> Result<()> {
-        let blob_path = format!("/{}/{}", self.container, key);
+        let blob_path = self.blob_path(key)?;
         let len = data.len();
         let query = [("comp", "block"), ("blockid", block_id)];
         let (url, headers) = self.request_parts("PUT", &blob_path, &query, len, &[]);
@@ -324,7 +332,7 @@ impl AzureBlobStore {
 
     /// Commit a block upload (`?comp=blocklist`) in submission order.
     pub(crate) fn commit_block_upload(&self, key: &str, block_ids: &[String]) -> Result<()> {
-        let blob_path = format!("/{}/{}", self.container, key);
+        let blob_path = self.blob_path(key)?;
         let mut body = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>");
         for id in block_ids {
             body.push_str(&format!("<Latest>{id}</Latest>"));
@@ -343,6 +351,37 @@ impl AzureBlobStore {
             .map_err(|e| http_error("azure commit blocklist", key, e))?;
         Ok(())
     }
+}
+
+/// Percent-encode a blob key for use in a URL path: `/` separators are kept,
+/// every byte outside the RFC 3986 unreserved set becomes `%XX`. Without this a
+/// key containing `?`, `#`, `%`, spaces or CR/LF changes the request URL (or
+/// splits the request line) and no longer matches what was signed.
+///
+/// Empty keys, NUL, and `.`/`..` path segments are rejected: servers
+/// normalize dot segments, which would let a key address another container.
+fn encode_blob_key(key: &str) -> Result<String> {
+    if key.is_empty() {
+        return Err(Error::Cloud("azure: blob key is empty".into()));
+    }
+    if key.contains('\0') {
+        return Err(Error::Cloud("azure: blob key contains a NUL byte".into()));
+    }
+    if key.split('/').any(|seg| seg == "." || seg == "..") {
+        return Err(Error::Cloud(format!(
+            "azure: blob key {key:?} contains a '.' or '..' path segment"
+        )));
+    }
+    let mut out = String::with_capacity(key.len());
+    for b in key.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    Ok(out)
 }
 
 /// Block ids must be identical in the `?blockid=` query and the block list
@@ -443,7 +482,14 @@ impl AzureBlobSource {
         let format = CloudFormat::detect(&key);
         let (reader, handle) =
             StreamingReader::spawn(move |tx: &BatchTx| match store.read_object(&key) {
-                Ok(body) => decode_object_stream(tx, body, format, chunk_rows, &Default::default()),
+                Ok(body) => decode_object_stream(
+                    tx,
+                    body,
+                    format,
+                    chunk_rows,
+                    &Default::default(),
+                    &Default::default(),
+                ),
                 Err(e) => {
                     let _ = tx.send(Err(e));
                 }
@@ -607,6 +653,37 @@ mod tests {
         let shown = format!("{c:?}");
         assert!(shown.contains("acct"));
         assert!(!shown.contains("c2VjcmV0a2V5"), "{shown}");
+    }
+
+    #[test]
+    fn blob_keys_are_percent_encoded() {
+        assert_eq!(encode_blob_key("a/b c.csv").unwrap(), "a/b%20c.csv");
+        assert_eq!(encode_blob_key("x?y#z%.csv").unwrap(), "x%3Fy%23z%25.csv");
+        // Multi-byte UTF-8 is encoded per byte.
+        assert_eq!(encode_blob_key("caf\u{e9}").unwrap(), "caf%C3%A9");
+        // CR/LF cannot reach the request line.
+        assert_eq!(encode_blob_key("a\r\nb").unwrap(), "a%0D%0Ab");
+        assert_eq!(
+            encode_blob_key("dir/file-1_2.~x").unwrap(),
+            "dir/file-1_2.~x"
+        );
+    }
+
+    #[test]
+    fn hostile_blob_keys_are_rejected() {
+        for bad in ["", "a\0b", "../other/x", "a/../b", "./x", "a/.."] {
+            assert!(encode_blob_key(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn blob_path_uses_encoded_key() {
+        let creds = AzureCredentials::new("acct", "c2VjcmV0");
+        let store =
+            AzureBlobStore::new("https://acct.blob.core.windows.net", "lake", &creds).unwrap();
+        assert_eq!(store.blob_path("a b?.csv").unwrap(), "/lake/a%20b%3F.csv");
+        let (url, _) = store.request_parts("GET", "/lake/a%20b%3F.csv", &[], 0, &[]);
+        assert_eq!(url, "https://acct.blob.core.windows.net/lake/a%20b%3F.csv");
     }
 
     #[test]

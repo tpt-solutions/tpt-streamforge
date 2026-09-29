@@ -198,6 +198,20 @@ fn starter_template() -> std::path::PathBuf {
         .join("pipeline.toml")
 }
 
+/// The CLI example is a feature tour rather than a second starter template, so
+/// it carries stages (`limit`) the template deliberately omits. It still has to
+/// parse and run against the shipped `input.csv`.
+#[test]
+fn cli_example_parses() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("pipeline.toml");
+    let text = std::fs::read_to_string(&path).expect("example pipeline must be readable");
+    let spec = parse_pipeline_toml(&text).expect("example pipeline must parse");
+    assert!(!spec.stages.is_empty());
+    assert!(spec.sink.is_some());
+}
+
 /// Parsing alone is not enough: the template must also *run*. This catches
 /// stage-ordering mistakes such as a `map` that drops a column a later stage
 /// (`expect`/`aggregate`) still needs.
@@ -293,4 +307,67 @@ async fn dead_letter_key_creates_the_queue_file() {
     // Nothing failed, so the queue exists but is empty.
     assert_eq!(std::fs::read_to_string(&dlq).unwrap(), "");
     assert_eq!(std::fs::read_to_string(&out_csv).unwrap(), "a\n1\n2\n");
+}
+
+fn run_toml(
+    dir: &tempfile::TempDir,
+    in_csv: &std::path::Path,
+    stage: &str,
+) -> (std::path::PathBuf, anyhow::Result<String>) {
+    let out_csv = dir.path().join("out.csv");
+    let toml = format!(
+        "[source.csv]\npath = \"{}\"\n\n[[stages]]\n{stage}\n\n[sink.csv]\npath = \"{}\"\n",
+        toml_path(in_csv),
+        toml_path(&out_csv)
+    );
+    let pipeline_file = dir.path().join("pipeline.toml");
+    write(&pipeline_file, &toml);
+    let r = futures_block(run_command_default(&pipeline_file, true));
+    (out_csv, r)
+}
+
+fn futures_block<F: std::future::Future>(f: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expect_contract_checks_pass_and_fail() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_csv = dir.path().join("in.csv");
+    write(&in_csv, "age,region\n10,north\n50,south\n");
+
+    let ok = "expect = { ranges = { age = { min = 0, max = 120 } }, one_of = { region = [\"north\", \"south\"] }, types = { age = \"int32\" } }";
+    assert!(run_toml(&dir, &in_csv, ok).1.is_ok());
+
+    let bad_range = "expect = { ranges = { age = { max = 20 } } }";
+    assert!(run_toml(&dir, &in_csv, bad_range).1.is_err());
+    let bad_set = "expect = { one_of = { region = [\"north\"] } }";
+    assert!(run_toml(&dir, &in_csv, bad_set).1.is_err());
+    let bad_type = "expect = { types = { region = \"int32\" } }";
+    assert!(run_toml(&dir, &in_csv, bad_type).1.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sample_stage_is_deterministic_and_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_csv = dir.path().join("in.csv");
+    let mut data = String::from("id\n");
+    for i in 0..2000 {
+        data.push_str(&format!("{i}\n"));
+    }
+    write(&in_csv, &data);
+    let stage = "sample = { fraction = 0.25, key = [\"id\"], seed = 7 }";
+    let (out, r) = run_toml(&dir, &in_csv, stage);
+    r.unwrap();
+    let first = std::fs::read_to_string(&out).unwrap();
+    let (_, r) = run_toml(&dir, &in_csv, stage);
+    r.unwrap();
+    assert_eq!(first, std::fs::read_to_string(&out).unwrap());
+    let rows = first.lines().count() - 1;
+    assert!((350..650).contains(&rows), "kept {rows} of 2000");
+    assert!(
+        run_toml(&dir, &in_csv, "sample = { fraction = 2.0, key = [\"id\"] }")
+            .1
+            .is_err()
+    );
 }

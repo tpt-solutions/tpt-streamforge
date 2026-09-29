@@ -13,6 +13,9 @@ pub enum Error {
         expected: usize,
         got: usize,
     },
+    /// A single record exceeded the reader's `max_record_bytes` cap (for
+    /// example an unterminated quoted field swallowing the rest of the input).
+    RecordTooLarge { line: u64, limit: usize },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -30,6 +33,10 @@ impl fmt::Display for Error {
                 f,
                 "csv: row at line {line} has {got} field(s), expected {expected}"
             ),
+            Error::RecordTooLarge { line, limit } => write!(
+                f,
+                "csv: record at line {line} exceeds the {limit}-byte record size limit"
+            ),
         }
     }
 }
@@ -38,7 +45,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Io(e) => Some(e),
-            Error::Utf8 { .. } | Error::Ragged { .. } => None,
+            Error::Utf8 { .. } | Error::Ragged { .. } | Error::RecordTooLarge { .. } => None,
         }
     }
 }

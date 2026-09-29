@@ -35,22 +35,132 @@ pub enum ErrorPolicy {
     Quarantine(String),
 }
 
+/// Default cap on a single record / line / JSON array element: 16 MiB.
+pub const DEFAULT_MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+/// Default cap on the decompressed size of a gzip input: 64 GiB. Sources
+/// stream, so this bounds work (a decompression bomb) rather than memory.
+pub const DEFAULT_MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+/// Resource caps applied to untrusted input by the file, HTTP and cloud
+/// sources. Exceeding a cap is an error, never silent truncation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLimits {
+    /// Longest CSV record, JSONL line or JSON-array element accepted.
+    pub max_record_bytes: usize,
+    /// Most bytes a gzip stream may decompress to.
+    pub max_decompressed_bytes: u64,
+}
+
+impl Default for SourceLimits {
+    fn default() -> Self {
+        SourceLimits {
+            max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
+            max_decompressed_bytes: DEFAULT_MAX_DECOMPRESSED_BYTES,
+        }
+    }
+}
+
+/// Reader adapter that fails with `InvalidData` once more than `limit` bytes
+/// would be produced (a source of exactly `limit` bytes is fine).
+#[allow(dead_code)]
+pub(crate) struct LimitedReader<R> {
+    inner: R,
+    remaining: u64,
+    what: &'static str,
+    limit: u64,
+}
+
+#[allow(dead_code)]
+impl<R> LimitedReader<R> {
+    pub(crate) fn new(inner: R, limit: u64, what: &'static str) -> Self {
+        LimitedReader {
+            inner,
+            remaining: limit,
+            what,
+            limit,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<R: std::io::Read> std::io::Read for LimitedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            // At the limit: fine only if the source is genuinely exhausted.
+            let mut probe = [0u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{} exceeds the {}-byte limit", self.what, self.limit),
+                )),
+            };
+        }
+        let cap = (buf.len() as u64).min(self.remaining) as usize;
+        let n = self.inner.read(&mut buf[..cap])?;
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
+
+/// Wrap `reader` in a gzip decoder whose output is capped at
+/// `limits.max_decompressed_bytes`.
+#[cfg(all(feature = "gzip", feature = "async"))]
+pub(crate) fn gunzip_limited<R: std::io::Read + Send + 'static>(
+    reader: R,
+    limits: &SourceLimits,
+) -> Box<dyn BufRead + Send> {
+    Box::new(std::io::BufReader::with_capacity(
+        64 * 1024,
+        LimitedReader::new(
+            flate2::read::MultiGzDecoder::new(reader),
+            limits.max_decompressed_bytes,
+            "decompressed gzip output",
+        ),
+    ))
+}
+
 /// Open a (possibly gzip-compressed) file as a buffered reader. With the
 /// `gzip` feature, names ending in `.gz` are transparently decompressed.
 #[cfg(feature = "async")]
 pub(crate) fn open_file_buffered(path: &str) -> std::io::Result<Box<dyn BufRead + Send>> {
+    open_file_buffered_with(path, &SourceLimits::default())
+}
+
+#[cfg(feature = "async")]
+pub(crate) fn open_file_buffered_with(
+    path: &str,
+    limits: &SourceLimits,
+) -> std::io::Result<Box<dyn BufRead + Send>> {
     let file = std::fs::File::open(path)?;
     #[cfg(feature = "gzip")]
     if path.ends_with(".gz") {
-        use flate2::read::MultiGzDecoder;
-        return Ok(Box::new(std::io::BufReader::with_capacity(
-            64 * 1024,
-            MultiGzDecoder::new(file),
-        )));
+        return Ok(gunzip_limited(file, limits));
     }
     #[cfg(not(feature = "gzip"))]
-    let _ = path;
+    let _ = (path, limits);
     Ok(Box::new(std::io::BufReader::with_capacity(64 * 1024, file)))
+}
+
+/// Read one newline-terminated line, failing instead of buffering more than
+/// `max` bytes when the input never sends a newline.
+#[cfg(feature = "async")]
+fn read_line_capped<R: BufRead + ?Sized>(
+    reader: &mut R,
+    line: &mut String,
+    max: usize,
+) -> std::io::Result<usize> {
+    let n = std::io::Read::take(&mut *reader, max as u64 + 1).read_line(line)?;
+    if n > max && !line.ends_with('\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("line exceeds the {max}-byte record size limit"),
+        ));
+    }
+    Ok(n)
 }
 
 #[cfg(feature = "async")]
@@ -139,6 +249,7 @@ pub struct CsvSource {
     path: String,
     chunk_rows: usize,
     policy: ErrorPolicy,
+    limits: SourceLimits,
 }
 
 #[cfg(feature = "async")]
@@ -154,11 +265,18 @@ impl CsvSource {
             path: path.into(),
             chunk_rows,
             policy: ErrorPolicy::default(),
+            limits: SourceLimits::default(),
         }
     }
 
     pub fn with_chunk_size(mut self, rows: usize) -> Self {
         self.chunk_rows = rows;
+        self
+    }
+
+    /// Override the record-size and decompressed-size caps.
+    pub fn with_limits(mut self, limits: SourceLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -173,8 +291,10 @@ impl CsvSource {
             let path = self.path.clone();
             let chunk_rows = self.chunk_rows;
             let policy = self.policy.clone();
-            let (reader, handle) =
-                StreamingReader::spawn(move |tx| csv_read_loop(tx, &path, chunk_rows, &policy));
+            let limits = self.limits;
+            let (reader, handle) = StreamingReader::spawn(move |tx| {
+                csv_read_loop(tx, &path, chunk_rows, &policy, &limits)
+            });
             let _ = handle;
             self.reader = Some(reader);
         }
@@ -188,9 +308,10 @@ fn csv_read_loop(
     path: &str,
     chunk_rows: usize,
     policy: &ErrorPolicy,
+    limits: &SourceLimits,
 ) {
-    match open_file_buffered(path) {
-        Ok(reader) => csv_read_stream(tx, reader, chunk_rows, policy),
+    match open_file_buffered_with(path, limits) {
+        Ok(reader) => csv_read_stream(tx, reader, chunk_rows, policy, limits),
         Err(e) => {
             let _ = tx.send(Err(Error::Io(e)));
         }
@@ -207,14 +328,16 @@ pub(crate) fn csv_read_stream(
     reader: Box<dyn BufRead + Send>,
     chunk_rows: usize,
     policy: &ErrorPolicy,
+    limits: &SourceLimits,
 ) {
-    let mut columnar = match ColumnarReader::from_reader(reader) {
-        Ok(cr) => cr,
-        Err(e) => {
-            let _ = tx.send(Err(Error::Csv(e)));
-            return;
-        }
-    };
+    let mut columnar =
+        match ColumnarReader::from_reader_with_max_record_bytes(reader, limits.max_record_bytes) {
+            Ok(cr) => cr,
+            Err(e) => {
+                let _ = tx.send(Err(Error::Csv(e)));
+                return;
+            }
+        };
     let headers: Vec<String> = columnar.headers().iter().map(|s| s.to_string()).collect();
     if headers.is_empty() {
         let _ = tx.send(Err(Error::Schema("CSV file has no header row".into())));
@@ -624,6 +747,7 @@ pub struct JsonlSource {
     path: String,
     chunk_rows: usize,
     policy: ErrorPolicy,
+    limits: SourceLimits,
 }
 
 #[cfg(feature = "async")]
@@ -639,11 +763,18 @@ impl JsonlSource {
             path: path.into(),
             chunk_rows,
             policy: ErrorPolicy::default(),
+            limits: SourceLimits::default(),
         }
     }
 
     pub fn with_chunk_size(mut self, rows: usize) -> Self {
         self.chunk_rows = rows;
+        self
+    }
+
+    /// Override the line-size and decompressed-size caps.
+    pub fn with_limits(mut self, limits: SourceLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -658,8 +789,10 @@ impl JsonlSource {
             let path = self.path.clone();
             let chunk_rows = self.chunk_rows;
             let policy = self.policy.clone();
-            let (reader, handle) =
-                StreamingReader::spawn(move |tx| jsonl_read_loop(tx, &path, chunk_rows, &policy));
+            let limits = self.limits;
+            let (reader, handle) = StreamingReader::spawn(move |tx| {
+                jsonl_read_loop(tx, &path, chunk_rows, &policy, &limits)
+            });
             let _ = handle;
             self.reader = Some(reader);
         }
@@ -673,9 +806,10 @@ fn jsonl_read_loop(
     path: &str,
     chunk_rows: usize,
     policy: &ErrorPolicy,
+    limits: &SourceLimits,
 ) {
-    match open_file_buffered(path) {
-        Ok(reader) => jsonl_read_stream(tx, reader, chunk_rows, policy),
+    match open_file_buffered_with(path, limits) {
+        Ok(reader) => jsonl_read_stream(tx, reader, chunk_rows, policy, limits),
         Err(e) => {
             let _ = tx.send(Err(Error::Io(e)));
         }
@@ -689,6 +823,7 @@ pub(crate) fn jsonl_read_stream(
     mut reader: Box<dyn BufRead + Send>,
     chunk_rows: usize,
     policy: &ErrorPolicy,
+    limits: &SourceLimits,
 ) {
     let mut objects: Vec<serde_json::Value> = Vec::with_capacity(chunk_rows);
     let mut schema: Option<Vec<(String, DataType)>> = None;
@@ -705,7 +840,7 @@ pub(crate) fn jsonl_read_stream(
     };
 
     loop {
-        match reader.read_line(&mut line) {
+        match read_line_capped(&mut *reader, &mut line, limits.max_record_bytes) {
             Ok(0) => break,
             Ok(_) => {
                 let trimmed = line.trim().to_string();
@@ -961,20 +1096,33 @@ pub struct JsonArraySource {
 
 #[cfg(feature = "async")]
 impl JsonArraySource {
-    pub fn open(path: impl Into<String>) -> Self {
-        JsonArraySource::open_with_chunk_size(path, DEFAULT_CHUNK_ROWS)
-    }
-
-    pub fn open_with_chunk_size(path: impl Into<String>, chunk_rows: usize) -> Self {
+    /// Like [`open_with_chunk_size`](Self::open_with_chunk_size) with explicit
+    /// element-size and decompressed-size caps.
+    pub fn open_with_limits(
+        path: impl Into<String>,
+        chunk_rows: usize,
+        limits: SourceLimits,
+    ) -> Self {
         let path = path.into();
         let (reader, handle) =
-            StreamingReader::spawn(move |tx| json_array_read_loop(tx, &path, chunk_rows));
+            StreamingReader::spawn(move |tx| json_array_read_loop(tx, &path, chunk_rows, &limits));
         let _ = handle;
         JsonArraySource {
             reader,
             pending: None,
             chunk_rows,
         }
+    }
+}
+
+#[cfg(feature = "async")]
+impl JsonArraySource {
+    pub fn open(path: impl Into<String>) -> Self {
+        JsonArraySource::open_with_chunk_size(path, DEFAULT_CHUNK_ROWS)
+    }
+
+    pub fn open_with_chunk_size(path: impl Into<String>, chunk_rows: usize) -> Self {
+        JsonArraySource::open_with_limits(path, chunk_rows, SourceLimits::default())
     }
 
     pub fn with_chunk_size(mut self, rows: usize) -> Self {
@@ -984,9 +1132,14 @@ impl JsonArraySource {
 }
 
 #[cfg(feature = "async")]
-fn json_array_read_loop(tx: &UnboundedSender<BatchResult>, path: &str, chunk_rows: usize) {
-    match open_file_buffered(path) {
-        Ok(reader) => json_array_read_stream(tx, reader, chunk_rows),
+fn json_array_read_loop(
+    tx: &UnboundedSender<BatchResult>,
+    path: &str,
+    chunk_rows: usize,
+    limits: &SourceLimits,
+) {
+    match open_file_buffered_with(path, limits) {
+        Ok(reader) => json_array_read_stream(tx, reader, chunk_rows, limits),
         Err(e) => {
             let _ = tx.send(Err(Error::Io(e)));
         }
@@ -999,8 +1152,9 @@ pub(crate) fn json_array_read_stream(
     tx: &UnboundedSender<BatchResult>,
     reader: Box<dyn BufRead + Send>,
     chunk_rows: usize,
+    limits: &SourceLimits,
 ) {
-    let mut scanner = JsonArrayScanner::new(reader);
+    let mut scanner = JsonArrayScanner::new(reader, limits.max_record_bytes);
     let mut objects: Vec<serde_json::Value> = Vec::with_capacity(chunk_rows);
     let mut schema: Option<Vec<(String, DataType)>> = None;
 
@@ -1050,15 +1204,17 @@ struct JsonArrayScanner<R: BufRead> {
     reader: R,
     open: bool,
     closed: bool,
+    max_element_bytes: usize,
 }
 
 #[cfg(feature = "async")]
 impl<R: BufRead> JsonArrayScanner<R> {
-    fn new(reader: R) -> Self {
+    fn new(reader: R, max_element_bytes: usize) -> Self {
         JsonArrayScanner {
             reader,
             open: false,
             closed: false,
+            max_element_bytes,
         }
     }
 
@@ -1084,6 +1240,16 @@ impl<R: BufRead> JsonArrayScanner<R> {
             }
             let b = one[0];
             let c = b as char;
+
+            if buf.len() >= self.max_element_bytes {
+                return Err(serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "JSON array element exceeds the {}-byte record size limit",
+                        self.max_element_bytes
+                    ),
+                )));
+            }
 
             if !started {
                 if c.is_whitespace() {

@@ -1,5 +1,7 @@
 name: Playground (GitHub Pages)
 
+# TODO(F11): pin every `uses:` to a full commit SHA (see ci.yml).
+
 on:
   push:
     branches: [master]
@@ -35,7 +37,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        run: cargo install wasm-pack --locked --version 0.13.1
       - name: Build browser wasm package
         run: wasm-pack build --target bundler --out-dir browser/pkg
         working-directory: tpt-stream-wasm

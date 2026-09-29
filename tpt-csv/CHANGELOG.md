@@ -6,6 +6,11 @@ Per-crate history. The workspace-wide log lives in the
 ## [Unreleased]
 
 ### Added
+- `ReaderBuilder::max_record_bytes` (default `DEFAULT_MAX_RECORD_BYTES`, 16 MiB)
+  and `ColumnarReader::from_reader_with_max_record_bytes`: a record larger than
+  the cap (e.g. an unterminated quoted field) fails with the new
+  `Error::RecordTooLarge` instead of buffering the rest of the input. Checked
+  once per 64 KiB refill, so the cap may be exceeded by up to one buffer.
 - `parallel` module for splitting a whole in-memory CSV buffer into slices that
   can be parsed independently and concurrently:
   - `find_chunk_boundaries(buf, records_per_chunk)` — a single quote-aware

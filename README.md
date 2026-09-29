@@ -70,7 +70,7 @@ loading whole datasets into memory.
 | `tpt-stream-py` | Python | `pip install tpt-streamforge` |
 | `tpt-stream-wasm/node` | Node.js | `npm install tpt-streamforge-node` |
 | `tpt-stream-wasm/browser` | Browser | `npm install tpt-streamforge-browser` |
-| `tpt-stream-cli` | Rust | `tptforge` CLI; `cargo install --path tpt-stream-cli` |
+| `tpt-stream-cli` | Rust | `tptforge` CLI; `cargo install tpt-stream-cli` (or prebuilt binaries, see its README) |
 | `templates/pipeline-starter` | TOML | copy-paste template for new pipelines |
 
 ## Quick start

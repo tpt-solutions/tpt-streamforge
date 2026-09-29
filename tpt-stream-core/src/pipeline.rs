@@ -424,6 +424,16 @@ impl Pipeline {
         self.stage(crate::expect::Expect::new(checks))
     }
 
+    /// Keep a deterministic, key-consistent `fraction` (`0.0..=1.0`) of rows:
+    /// a row survives when a stable hash of `(seed, key_columns)` falls below
+    /// `fraction`. Same input + seed always gives the same sample, and rows
+    /// sharing a key are kept or dropped together. Invalid arguments (fraction
+    /// outside `[0, 1]`, no key columns, unknown column) fail at `execute()`.
+    pub fn sample(&mut self, fraction: f64, key_columns: &[&str], seed: u64) -> &mut Self {
+        let keys: Vec<String> = key_columns.iter().map(|s| s.to_string()).collect();
+        self.stage(crate::sample::Sample::new(fraction, keys, seed))
+    }
+
     /// Pass through only the first `n` rows (pipeline `LIMIT`).
     pub fn limit(&mut self, n: usize) -> &mut Self {
         self.stage(crate::transform::Limit::new(n))

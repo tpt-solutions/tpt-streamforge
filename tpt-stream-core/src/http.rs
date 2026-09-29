@@ -9,7 +9,7 @@
 
 use crate::cloud::{decode_object_stream, CloudFormat};
 use crate::error::{Error, Result};
-use crate::source::{BatchTx, ErrorPolicy, Source, StreamingReader};
+use crate::source::{BatchTx, ErrorPolicy, Source, SourceLimits, StreamingReader};
 use crate::table::RecordBatch;
 use std::io::BufRead;
 
@@ -19,6 +19,8 @@ pub struct HttpSource {
     chunk_rows: usize,
     url: String,
     policy: ErrorPolicy,
+    limits: SourceLimits,
+    max_body: Option<u64>,
 }
 
 impl HttpSource {
@@ -32,7 +34,21 @@ impl HttpSource {
             url: url.into(),
             chunk_rows,
             policy: ErrorPolicy::default(),
+            limits: SourceLimits::default(),
+            max_body: None,
         }
+    }
+
+    /// Override the record-size and decompressed-size caps.
+    pub fn with_limits(mut self, limits: SourceLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Cap the (compressed, on-the-wire) response body at `bytes`.
+    pub fn with_max_body(mut self, bytes: u64) -> Self {
+        self.max_body = Some(bytes);
+        self
     }
 
     pub fn with_chunk_size(mut self, rows: usize) -> Self {
@@ -51,9 +67,11 @@ impl HttpSource {
             let url = self.url.clone();
             let chunk_rows = self.chunk_rows;
             let policy = self.policy.clone();
+            let limits = self.limits;
+            let max_body = self.max_body;
             let format = CloudFormat::detect(&url);
             let (reader, handle) = StreamingReader::spawn(move |tx: &BatchTx| {
-                http_read(tx, &url, format, chunk_rows, &policy);
+                http_read(tx, &url, format, chunk_rows, &policy, &limits, max_body);
             });
             let _ = handle;
             self.reader = Some(reader);
@@ -77,8 +95,13 @@ fn http_read(
     format: CloudFormat,
     chunk_rows: usize,
     policy: &ErrorPolicy,
+    limits: &SourceLimits,
+    max_body: Option<u64>,
 ) {
-    let agent = crate::httpclient::Agent::new();
+    let mut agent = crate::httpclient::Agent::new();
+    if let Some(max) = max_body {
+        agent = agent.with_max_body(max);
+    }
     let response = match agent.get(url).call() {
         Ok(r) => r,
         Err(crate::httpclient::Error::Status(code, resp)) => {
@@ -106,10 +129,7 @@ fn http_read(
                 .is_some_and(|e| e.contains("gzip"));
         let reader = response.into_reader();
         if content_gzipped {
-            Box::new(std::io::BufReader::with_capacity(
-                64 * 1024,
-                flate2::read::MultiGzDecoder::new(reader),
-            ))
+            crate::source::gunzip_limited(reader, limits)
         } else {
             Box::new(std::io::BufReader::with_capacity(64 * 1024, reader))
         }
@@ -120,7 +140,7 @@ fn http_read(
         response.into_reader(),
     ));
 
-    decode_object_stream(tx, body, format, chunk_rows, policy);
+    decode_object_stream(tx, body, format, chunk_rows, policy, limits);
 }
 
 #[async_trait::async_trait]

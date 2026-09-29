@@ -103,8 +103,23 @@ class Pipeline:
         rows_at_most: int | None = None,
         no_nulls: list[str] | None = None,
         unique: list[str] | None = None,
+        ranges: dict[str, tuple[float | None, float | None]] | None = None,
+        one_of: dict[str, list[Any]] | None = None,
+        types: dict[str, str] | None = None,
     ) -> Pipeline:
-        """Attach data-quality checks; a violation aborts `execute()`."""
+        """Attach data-quality checks; a violation aborts `execute()`.
+
+        `ranges={"age": (0, 120)}` (either bound may be `None`; nulls skipped),
+        `one_of={"status": ["a", "b"]}`, `types={"id": "int32"}` (one of int32,
+        int64, float32, float64, utf8, bool, date, timestamp).
+        """
+        ...
+    def sample(self, fraction: float, key: list[str], seed: int = 0) -> Pipeline:
+        """Keep a deterministic `fraction` (0..=1) of rows by hashing `key` columns.
+
+        The same input and `seed` always give the same sample, and rows that
+        share a key are kept or dropped together.
+        """
         ...
     def on_error(self, policy: str) -> Pipeline:
         """`"strict"` (default), `"skip"`, or `"quarantine:<path>"`."""

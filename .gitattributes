@@ -1,0 +1,2 @@
+# Keep installer scripts LF so `sh install.sh` works after a Windows checkout.
+*.sh text eol=lf

@@ -145,11 +145,14 @@ pub(crate) fn decode_object_stream(
     format: CloudFormat,
     chunk_rows: usize,
     policy: &crate::source::ErrorPolicy,
+    limits: &crate::source::SourceLimits,
 ) {
     match format {
-        CloudFormat::Csv => crate::source::csv_read_stream(tx, body, chunk_rows, policy),
-        CloudFormat::Jsonl => crate::source::jsonl_read_stream(tx, body, chunk_rows, policy),
-        CloudFormat::Json => crate::source::json_array_read_stream(tx, body, chunk_rows),
+        CloudFormat::Csv => crate::source::csv_read_stream(tx, body, chunk_rows, policy, limits),
+        CloudFormat::Jsonl => {
+            crate::source::jsonl_read_stream(tx, body, chunk_rows, policy, limits)
+        }
+        CloudFormat::Json => crate::source::json_array_read_stream(tx, body, chunk_rows, limits),
         CloudFormat::Columnar => crate::source::columnar_read_stream(tx, body),
     }
 }

@@ -5,6 +5,13 @@ Per-crate history. The workspace-wide log lives in the
 
 ## [Unreleased]
 
+### Changed
+- Distinct opaque handle types in the C header: `TptPipeline *` and
+  `TptRecordBatch *` replace `void *`, so passing a batch to a pipeline
+  function (or vice versa) is now a compile-time error in C. Source-compatible
+  for C callers that only store the handles; callers that declared `void *p`
+  still compile (implicit conversion) but lose the check. ABI is unchanged.
+
 ### Added
 - Error code mapping for the new engine error kinds
   (`Cloud`, `DataQuality` -> `TPT_ERR_EXEC`).

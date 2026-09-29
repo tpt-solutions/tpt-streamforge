@@ -10,16 +10,17 @@ ships in any artifact.
 
 ## Handles and errors
 
-Handles are opaque `void *`:
+Handles are opaque pointers to two distinct, forward-declared struct types:
 
-- a **pipeline** â€” created by `tpt_pipeline_new`, released by `tpt_pipeline_free`
-- a **record batch** â€” created by `tpt_record_batch_read`, released by
+- `TptPipeline *` — created by `tpt_pipeline_new`, released by `tpt_pipeline_free`
+- `TptRecordBatch *` — created by `tpt_record_batch_read`, released by
   `tpt_record_batch_free`
 
-The two kinds are not distinguishable at the type level, so passing a batch to
-a pipeline function (or the reverse) is undefined behaviour. Freeing a handle
-twice is also undefined behaviour. A handle must not be used from two threads
-at once; distinct handles are independent.
+The types are distinct, so passing a batch to a pipeline function (or the
+reverse) is a C compile-time diagnostic (`incompatible pointer types`) instead
+of undefined behaviour; a test in `tests/c_integration.rs` pins this. Freeing a
+handle twice is still undefined behaviour. A handle must not be used from two
+threads at once; distinct handles are independent.
 
 Every fallible function returns an `int` status: `TPT_OK`, `TPT_ERR_INVALID_ARG`,
 `TPT_ERR_IO`, `TPT_ERR_CSV`, `TPT_ERR_JSON`, `TPT_ERR_SCHEMA`, `TPT_ERR_EXEC`,
@@ -31,7 +32,7 @@ Panics never cross the boundary; they surface as `TPT_ERR_PANIC`.
 ## Building a pipeline
 
 ```c
-void *p = NULL;
+TptPipeline *p = NULL;
 tpt_pipeline_new(&p);
 tpt_pipeline_read_csv(p, "in.csv", 0);        /* 0 = default chunk size */
 tpt_pipeline_filter(p, "amount > 0");
@@ -73,8 +74,16 @@ cargo build -p tpt-stream-ffi --release
 ```
 
 A C integration test compiles `tests/c_integration/main.c` against the built
-library (`cargo test -p tpt-stream-ffi --test c_integration -- --ignored`,
-run automatically in CI on non-Windows runners).
+library (`cargo test -p tpt-stream-ffi --test c_integration -- --ignored
+--nocapture`, run automatically in CI on all three OSes).
+
+It needs a C compiler. Unix runner images ship one; on Windows the test uses the
+MinGW-w64 toolchain that ships in the `windows-latest` image, and `dlltool` from
+that toolchain to synthesize the import library â€” `rustc` emits a `cdylib` but no
+`.dll.a`, so a C linker cannot otherwise resolve the exports. If no compiler (or
+no `dlltool`) is present, the test prints `SKIPPED c_integration: <reason>` and
+passes, so a thin toolchain degrades to a documented no-op rather than a red
+build. `--nocapture` is what makes that message visible in the CI log.
 
 ## Tests
 

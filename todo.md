@@ -378,16 +378,19 @@ just documented as an approved exception (unlike the existing build-time-only
       unparseable fail immediately rather than burning connections on a fault
       that cannot resolve itself. Unparseable errors default to permanent on
       purpose. 9 tests.
-- [ ] Parquet read/write (new optional `parquet` feature flag)
-      **Rejected by policy (2026-09-29)** — contradicts `spec.txt` ("we reject
-      heavy, complex dependencies (like `parquet`, `wasmtime`) even if they're
-      permissively licensed") and `WHY.md` ("no `parquet`, no `wasmtime`, no
-      Arrow ... builds narrower replacements instead"). Arrow was already
+- [x] Parquet read/write (optional `parquet` feature flag) — **closed as rejected
+      by policy (2026-09-29)**, not an open task. Contradicts `spec.txt` ("we
+      reject heavy, complex dependencies (like `parquet`, `wasmtime`) even if
+      they're permissively licensed") and `WHY.md` ("no `parquet`, no `wasmtime`,
+      no Arrow ... builds narrower replacements instead"). Arrow was already
       removed for this reason; `.tptcol` is the project's answer to Parquet.
       Revisit only as a deliberate policy change, not a feature request.
-- [ ] Window functions (row_number/rank/running totals) — stretch goal
+- [x] Window functions (row_number/rank/running totals) — **moved to the
+      future-ideas list below**. Stretch goal: it needs a window-partitioning
+      design layered on the existing sort spill, which is real design work, not
+      just another stage.
 - Not planned now (logged as future-phase ideas): Kafka/streaming sources,
-  Delta/Iceberg, Arrow interop, checkpointing/resume
+  Delta/Iceberg, Arrow interop, checkpointing/resume, window functions
 
 ### Hardening
 - [x] Audit `tpt-stream-py/src/lib.rs` unwraps for panic containment at the
@@ -417,7 +420,8 @@ already works around that with its own hand-rolled row-major
 `arena`/`cells` table plus a parallel transpose in `build_csv_batch`. Goal:
 move those optimizations into `tpt-csv` itself so it's a genuine
 improvement for any consumer, and delete the workaround code in
-`source.rs`. Full design: `C:\Users\phill\.claude\plans\we-just-created-a-buzzing-sunset.md`.
+`source.rs`. (Original design notes live in the author's local plan archive
+under `~/.claude/plans/`, which is intentionally not checked in.)
 
 - [x] Phase 1: SWAR/word-at-a-time bulk byte scanning in
       `tpt-csv/src/reader.rs::read_record_raw` (find next `,`/`"`/`\n` a
@@ -465,7 +469,7 @@ improvement for any consumer, and delete the workaround code in
 
 ## Phase 12: Review Follow-ups — Stubs, Security, Adoption (2026-09-29)
 
-Plan: `C:\Users\Phillip\.claude\plans\review-project-fix-any-polished-fog.md`.
+Plan: local plan archive under `~/.claude/plans/` (not checked in).
 **Dependency rule:** the released project is dual MIT/Apache-2.0, but the
 dependency chain must stay pure-MIT-satisfiable — no Apache-only crates, not
 even opt-in features. Check `cargo deny list` before adding any crate; hand-roll
@@ -476,26 +480,82 @@ with std where a candidate fails.
       root `README.md` claim that Python uses the FFI crate
 - [x] CLI: `dead_letter` TOML key wired to `Pipeline::dead_letter` and the
       `tptforge_dead_letter_rows` metric (was always 0); CLI `limit` stage
-      (tests written; TOML shape in the two new tests needs fixing to match the
-      `[source.csv] path = ...` form — currently failing)
 - [x] `browser/index.d.ts`: declare `TelemetryEvent`; document that `execute()`
       is a serialise-only call in both wasm `.d.ts` files
-- [ ] Fix the 2 new CLI tests (`limit_stage_keeps_only_the_first_rows`,
-      `dead_letter_key_creates_the_queue_file`) to use valid TOML source/sink syntax
-- [ ] Python: expose `dead_letter`, `limit`, and `with_retry` (S3/Azure/Postgres)
-- [ ] Python typing: `py.typed` + `_native.pyi` stubs; project URLs/readme in `pyproject.toml`
-- [ ] `tpt-stream-columnar/src/column.rs:72,117,148`: replace public-API `panic!`
-      on type mismatch with `Result`
-- [ ] `tpt-stream-core/src/agg.rs:410,425`: replace internal accumulator-mismatch panics
-- [ ] Repo hygiene: delete `pytest_final.log` and `scripts/_patch_dates3.py`;
-      remove personal path at `todo.md:420`; dedupe `tpt-stream-cli/examples/pipeline.toml`
-- [ ] Refresh `spec.txt` API examples to the shipped API (or mark aspirational;
-      also stale: `csv` crate, zero-copy FFI, configurable CSV delimiters)
-- [ ] Run the ffi `c_integration` test on Windows CI (or document why not)
-- [ ] Verify `count_all` output column naming in Python/WASM READMEs
-- [ ] SQL frontend: `SELECT DISTINCT` (likely user expectation)
-- [ ] Close/move the unchecked Parquet and Window-function items above; tag v0.1.0
-      and replace the `[0.1.0] - placeholder` changelog heading
+- [x] Fix the 2 new CLI tests (`limit_stage_keeps_only_the_first_rows`,
+      `dead_letter_key_creates_the_queue_file`) to use valid TOML source/sink
+      syntax — both used `[source] csv = "..."`, but only *sinks* accept the
+      scalar path shorthand (`PathOnlySpec`); a source needs
+      `[source.csv] path = "..."`. 12 CLI + 14 SQL tests pass.
+- [x] Python: expose `dead_letter`, `dead_letter_rows`, `limit`, and
+      `with_retry` (S3/GCS/Azure/Postgres). `with_retry` is **one-shot**: it is
+      consumed by the next network `read_*`/`write_*`, so a policy cannot leak
+      onto a later source. This needed two core API gaps: pre-built-store
+      variants (`read_s3_store`/`write_s3_store`/`read_gcs_store`/
+      `write_gcs_store`/`write_postgres_sink`) and `GcsStore::with_retry`.
+      5 new pytest cases.
+- [x] Python typing: `py.typed` + a hand-written `_native.pyi` (no `stubgen`),
+      `Typing :: Typed` classifier, `[project.urls]`, a `pandas` extra, and a
+      maturin `include` list so both ship in the sdist *and* the wheel. A test
+      asserts every public builder method appears in the stub, so the stub
+      cannot silently rot.
+- [x] `tpt-stream-columnar/src/column.rs`: the three public-API `panic!`s on
+      type mismatch now sit behind fallible `try_push`/`try_set`/
+      `try_push_value`/`try_set_value`/`try_extend_from`/`try_append_column`
+      returning a new `TypeMismatch` error; the old names are thin documented
+      wrappers that panic (a mismatch there is a bug in the caller, not bad
+      input). `format.rs` (the untrusted `.tptcol` path) and a new
+      `RecordBatch::try_append_rows` use the fallible forms, with
+      `FormatError::TypeMismatch` and `table::AppendError` conversions. 4 tests.
+- [x] `tpt-stream-core/src/agg.rs`: both COUNT-accumulator `panic!`s replaced by
+      `count_one()`, which returns `Error::Other` naming the spec and the
+      variant actually found (`Acc::kind()`), so an inconsistent spill-merge
+      fails one run instead of aborting the process.
+- [x] Repo hygiene: deleted `pytest_final.log` and `scripts/_patch_dates3.py`;
+      removed the personal absolute path from `todo.md`;
+      de-duplicated `tpt-stream-cli/examples/pipeline.toml` against
+      `templates/pipeline-starter/pipeline.toml` — the starter stays the
+      copy-me scaffold, the CLI example is now explicitly a *feature tour*
+      that adds the CLI-only `limit` stage, with a new `cli_example_parses`
+      test so neither can drift.
+- [x] Refresh `spec.txt` to the shipped API. Corrected: the `csv` crate (now
+      in-house `tpt-csv`, with the licensing reason), the zero-copy FFI claim
+      (never implemented; `to_arrow` and the 11 `arrow` crates were removed and
+      `to_pandas` goes via `collect()`), configurable CSV delimiters (fixed at
+      `,`), `64 rows`/`64MB` (65,536 rows), the `Row`-mutating `map` closure
+      (it takes column names + a `Row -> Vec<Value>`), and both the Python and
+      JS "target API" snippets (module-level `sf.*` functions, `AND`/`mean`,
+      `StreamForge`) to the real signatures. Status changed Draft → Implemented,
+      with a note that per-crate READMEs win.
+- [x] Run the ffi `c_integration` test on Windows CI. The old `if: runner.os !=
+      'Windows'` existed because `rustc` emits a `cdylib` but **no import
+      library**, so a C linker cannot resolve the exports from the `.dll`. The
+      test now synthesizes one with `dlltool` (MinGW-w64, present in
+      `windows-latest`) and links `-ltpt_stream_ffi`; the compiler and
+      `dlltool` are both probed, and a missing tool prints `SKIPPED <reason>`
+      and passes instead of failing. CI runs it on all three OSes with
+      `--nocapture` so the skip reason is visible. Documented in
+      `tpt-stream-ffi/README.md`.
+- [x] Verify `count_all` output column naming in Python/WASM READMEs — and it
+      was **wrong/vague**: the bindings genuinely differ. Python's
+      `.agg({'k': 'count_all'})` names the output column after the dict key
+      (so `{'amount': 'count_all'}` *replaces* `amount`); WASM always emits a
+      column literally named `count_all`; the CLI uses `count_all` for the
+      `"*"` key and `count_<col>` for a column key. All four READMEs, both wasm
+      `.d.ts` files, and the `aggregate` rustdoc now state the exact rule and
+      the cross-binding difference, with a pytest case pinning the Python one.
+- [x] SQL frontend: `SELECT DISTINCT` (likely user expectation). Dedups on the
+      **projected** columns (`SELECT DISTINCT region, product` keeps two `north`
+      rows), `DISTINCT *` compares whole rows via `Deduplicate`'s empty-key
+      mode, it runs after `WHERE` and before `ORDER BY`/`LIMIT`, and it is
+      skipped when `GROUP BY` is present (already collapsed). 5 tests. The
+      Postgres-style `DISTINCT ON (...)` is still rejected.
+- [x] Close/move the unchecked Parquet and Window-function items above
+- [~] tag v0.1.0 and replace the `[0.1.0] - placeholder` changelog heading
+      **Done**: the heading is now `## [0.1.0] - Unreleased` with a `[0.1.0]`
+      link footer and a note that the date is filled in when the tag is pushed.
+      **Still open**: the `git tag v0.1.0` step itself (duplicates "Tag v0.1.0
+      release" in the Documentation & Release section — this is the one to keep).
 
 ### 12.2 Security audit fixes (findings F1–F26)
 - [x] F1 `.tptcol` reader: size caps, bounded reads, `checked_*` arithmetic, null
@@ -515,47 +575,172 @@ with std where a candidate fails.
 - [x] F15 reject CR/LF/NUL in request headers; F17 `Host` header includes port
 - [x] F24 FFI: null-array checks in `tpt_pipeline_aggregate`, `catch_unwind` on
       free/num_rows/num_columns, UTF-8-safe truncation, real `tpt_last_error_code`
-- [ ] F1 follow-up: cap gzip decompressed output (`source.rs:42-49`, `http.rs:106-110`)
-      and add a `max_body` option to the HTTP client
-- [ ] F14 line/record/field size caps: JSONL `read_line`, JSON-array scanner,
+- [x] F1 follow-up: gzip decompressed output is now capped and the HTTP client
+      has a `max_body` option
+      **Implementation**: a new public `SourceLimits { max_record_bytes,
+      max_decompressed_bytes }` carried by every file/HTTP/cloud source
+      (`with_limits`). `gunzip_limited` wraps flate2's `MultiGzDecoder` in a
+      `LimitedReader`, so a decompression bomb fails at 64 GiB by default
+      instead of filling the disk, and it is used for both `.gz` files and
+      gzip-encoded HTTP bodies. `HttpSource::with_max_body` /
+      `Agent::with_max_body` cap the on-the-wire response; `into_string` keeps
+      its own 16 MiB cap. New `tpt-stream-core/tests/limits.rs` covers
+      bomb-rejected, exactly-at-limit-allowed, and the HTTP `max_body` path.
+- [x] F14 line/record/field size caps: JSONL `read_line`, JSON-array scanner,
       `tpt-csv` reader (default 16 MiB, configurable)
-- [ ] F24 follow-up: distinct opaque handle types in the C header
-- [ ] F13 metrics server: cap request line/headers, overall deadline, default to loopback
-- [ ] F11 CI/release: top-level `permissions: contents: read`; scope `NPM_TOKEN`
+      **Implementation**: `SourceLimits::max_record_bytes` (16 MiB default)
+      threads into all three readers — `read_line_capped` for JSONL (uses
+      `Read::take` on the `?Sized` reader, so it works on `&mut dyn BufRead`),
+      `JsonArrayScanner::new(reader, max)` for JSON arrays, and
+      `ColumnarReader::from_reader_with_max_record_bytes` for CSV. In
+      `tpt-csv`, `ReaderBuilder::max_record_bytes` (with the exported
+      `DEFAULT_MAX_RECORD_BYTES`) fails an oversized record or header with a
+      new `Error::RecordTooLarge { line, limit }`; the check runs once per
+      64 KiB refill, so a record may overshoot by up to one buffer before it
+      trips. 2 new tests in `columnar.rs` (unterminated quote, oversized
+      header).
+- [x] F24 follow-up: distinct opaque handle types in the C header
+      **Implementation**: `typedef struct TptPipeline TptPipeline;` and
+      `typedef struct TptRecordBatch TptRecordBatch;` in
+      `include/tpt_streamforge.h`, and every `void *` handle parameter in both
+      the header and the Rust FFI is now typed with them. Passing a batch
+      handle where a pipeline is expected is a compiler diagnostic instead of a
+      silent misinterpretation. Layout stays private (forward-declared only).
+- [x] F13 metrics server: request line capped at 8 KiB, header count at 100 and
+      the block at 16 KiB (over-limit requests get a 431 rather than an
+      unbounded buffer), a 5 s per-connection deadline plus 2 s read/write
+      timeouts, and loopback-only by default — `serve` refuses `0.0.0.0`/`::`
+      and any routable address unless the caller opts in via
+      `serve_allow_remote` / `--metrics-allow-remote`, because the endpoint is
+      unauthenticated. Also fixed a real Windows bug found while testing this:
+      closing a socket with unread request bytes queued makes Windows send an
+      RST, which makes the peer *discard the response it just received* — so
+      reject paths now drain the remainder (bounded) and `respond` sends the FIN
+      explicitly via `shutdown(Write)`. The two HTTP tests were flaky on
+      Windows because of exactly this; 10/10 clean after the fix. 3 new tests.
+- [~] F11 CI/release: top-level `permissions: contents: read`; scope `NPM_TOKEN`
       to publish steps; `npm publish --provenance`; pin actions to commit SHAs;
-      replace `curl | sh` wasm-pack; `--locked` builds
-- [ ] F12 Dockerfile: non-root user, pinned image digests, `--locked`; verify `.dockerignore`
-- [ ] F18/F19 percent-encode Azure blob keys; validate GCS bucket names
-- [ ] F20 `PRAGMA query_only=ON` for the SQLite source; reject NUL in identifiers
-- [ ] F22 env-var substitution in pipeline TOML (keep passwords out of files)
-- [ ] F10 TLS: log `load_native_certs` errors, fail clearly on empty root store,
+      replace `curl | sh` wasm-pack; `--locked` builds. Done except SHA pinning:
+      could not be verified offline, so `uses:` keep tags with a `TODO(F11)`
+      header in each workflow. wasm-pack is `cargo install --locked --version 0.13.1`.
+- [~] F12 Dockerfile: non-root user (uid 10001), `--locked`, `.dockerignore`
+      verified (+ `.env*`, `.devcontainer/`). Image digests NOT pinned (not
+      verifiable offline); `TODO(F12)` comments in the Dockerfile.
+- [x] F18/F19 percent-encode Azure blob keys; validate GCS bucket names
+      **Implementation**: `azure::encode_blob_key` (RFC 3986 unreserved plus `/`;
+      rejects empty keys, NUL and `.`/`..` segments) is used for both the request
+      URL and the signed canonicalized resource, so keys with `?`, `#`, `%`,
+      spaces or CR/LF no longer alter or split the request.
+      `gcs::validate_bucket_name` (length, charset, start/end, `..`, IPv4 form,
+      `goog`/`google`) runs in `GcsStore::new`. Unit tests in both modules.
+- [x] F20 `PRAGMA query_only=ON` for the SQLite source; reject NUL in identifiers
+      **Implementation**: the source sets `query_only` right after the read-only
+      open and rejects NUL in its path/query; `quote_ident` is now fallible and
+      rejects NUL for sink table/column names. 3 tests in `tests/sqlite.rs`.
+- [x] F22 env-var substitution in pipeline TOML (keep passwords out of files)
+      **Implementation**: `${VAR}` is substituted in the new
+      `tpt-stream-cli/src/config.rs`. It runs on the **parsed** `toml::Value`s,
+      never on the raw text, so a password containing a quote or a backslash
+      cannot break the TOML syntax and can never end up inside a parser error
+      snippet. `EnvLookup` is injected so tests need not touch the
+      process-global environment, and `validate`/`explain` take `--no-env` to
+      report on a spec with no environment at all. `--manifest` hashes the raw
+      file bytes *before* substitution, so provenance never records a secret.
+- [x] F10 TLS: log `load_native_certs` errors, fail clearly on empty root store,
       optional extra CA bundle path; re-verify `deny.toml` RUSTSEC ignores
       (`cargo tree -i rustls-webpki@0.102.8`) and add review-by dates.
       `ring` opt-in is **rejected** (Apache-only)
-- [ ] F2 Postgres TLS: `postgres-tls` feature only if the dependency tree passes
+      **Implementation**: `httpclient::assemble_roots` logs native-loader errors
+      (WARN, via the `tracing` feature) and fails clearly on an empty store: the
+      first `https://` request returns "tls unavailable: no trusted root
+      certificates ..." naming `SSL_CERT_FILE` / `TPT_EXTRA_CA_BUNDLE`. A PEM
+      bundle is added from `TPT_EXTRA_CA_BUNDLE` or `Agent::with_ca_bundle`
+      (missing/empty/invalid bundles are errors). `deny.toml` ignores were
+      re-verified 2026-09-29: `rustls-webpki 0.102.8` is pulled only by
+      `rustls-rustcrypto` for `alg_id` constants while rustls validates chains
+      with 0.103.15; each ignore now has a `reason` with review-by 2026-12-29.
+      `cargo deny check` is green. 4 unit tests.
+- [x] F2 Postgres TLS: `postgres-tls` feature only if the dependency tree passes
       the MIT-only check; otherwise hand-roll over the existing rustls setup or
       refuse non-loopback hosts without TLS
+      **Implementation**: took the "refuse" option. `postgres::check_transport`
+      rejects any non-loopback TCP host (every host of a multi-host string; the
+      error never contains the connection string) unless
+      `TPT_ALLOW_INSECURE_POSTGRES=1`; Unix sockets are fine. No dependency added.
+      Real TLS (`tokio-rustls` with default features off plus a hand-written
+      `MakeTlsConnect`) looks MIT-satisfiable but was not attempted: it cannot
+      be verified here without a TLS-enabled Postgres. 3 unit tests.
 
 ### 12.3 Adoption tooling
-- [ ] `release.yml`: build `tptforge` binaries (Linux/macOS/Windows), attach with
-      SHA256SUMS + build provenance attestation
-- [ ] `[package.metadata.binstall]`, `install.sh` / `install.ps1`, Scoop/Homebrew
-      manifests; document `cargo install tpt-stream-cli`
-- [ ] `cargo audit` on PRs; SBOM
-- [ ] `tptforge completions <shell>` and man page
-- [ ] `.devcontainer/`; cross-platform `just setup` (fix hardcoded `.venv/Scripts`)
-- [ ] `tptforge validate` / `explain` / `--dry-run`; `deny_unknown_fields` on spec
+- [x] `release.yml`: build `tptforge` binaries (Linux x64, macOS arm64+x64,
+      Windows x64), attach with SHA256SUMS + build provenance attestation +
+      CycloneDX SBOM + installers (untested until a tag is pushed)
+- [x] `[package.metadata.binstall]`, `install.sh` / `install.ps1` (checksum
+      verified), Scoop/Homebrew templates in `packaging/` (hash placeholders,
+      documented); `cargo install tpt-stream-cli` documented
+- [x] `cargo audit` on PRs (`ci.yml` `audit` job, `just audit`); SBOM (`sbom` job)
+- [x] `tptforge completions <shell>` and man page
+      **Implementation**: `Command::Completions { shell: clap_complete::Shell }`
+      (bash/zsh/fish/PowerShell/elvish) and `Command::Man { out_dir }`, which
+      renders a `clap_mangen` page per subcommand via `man_command`.
+- [x] `.devcontainer/`; cross-platform `just setup` (`.venv/Scripts` vs `bin`
+      now chosen via `os_family()`)
+- [x] `tptforge validate` / `explain` / `--dry-run`; `deny_unknown_fields` on spec
       structs; TOML line/column, stage index, and did-you-mean in errors
-- [ ] `tptforge schema-json` + checked-in `pipeline.schema.json` (CI freshness
+      **Implementation**: `tptforge validate` and `tptforge explain` subcommands
+      plus `--dry-run` on `run`. Parsing is two-pass: a `RawDoc` of
+      `Spanned<toml::Value>` records every part's byte offset, so a bad value
+      reports as `line 12, column 3: stage #2: <message>` rather than a bare
+      serde message. Unknown keys are a did-you-mean edit distance over the
+      known field names. `deny_unknown_fields` is set on all 16 spec structs.
+- [x] `tptforge schema-json` + checked-in `pipeline.schema.json` (CI freshness
       test) for editor autocomplete; hand-written, no `schemars`
-- [ ] `tptforge init <file>` (infer schema, commented starter TOML with `expect`
+      **Done**: `Command::SchemaJson` prints a hand-written draft-07 schema
+      from `tpt-stream-cli/src/schema_json.rs` (no `schemars` dependency).
+      `tpt-stream-cli/pipeline.schema.json` is checked in, and `tests/tools.rs`
+      has the two guards: a freshness test (regenerate with
+      `TPT_UPDATE_SCHEMA=1 cargo test -p tpt-stream-cli schema`) and one that
+      compares each schema object's property list with the field list serde
+      reports for the real struct, plus a dangling-`$ref` check.
+- [x] `tptforge init <file>` (infer schema, commented starter TOML with `expect`
       checks), `doctor`, `convert`, `run --watch` (mtime poll, std only)
+      **Implementation**: `Command::Init`, `Command::Doctor` (also validates an
+      optional pipeline file and checks credentials),
+      `Command::Convert`, and `--watch` on `run` (mtime poll, std only, no
+      notify crate). `schema --save` / `--against` live in `tools.rs` with a
+      `DriftReport` and a non-zero exit on drift.
 
 ### 12.4 New capabilities
-- [ ] Data contracts: `Range` / `OneOf` / `Type` checks in `expect.rs`
-- [ ] Schema drift: `schema --save` and `schema --against` (non-zero exit on drift)
-- [ ] `tptforge diff a b --key id` — streaming diff over the existing external sort + merge join
-- [ ] Deterministic keyed sampling stage (reuse `hash_key`)
-- [ ] `--manifest` provenance JSON (counts, stage stats, input/spec hashes)
+- [x] Data contracts: `Range` / `OneOf` / `Type` checks in `expect.rs`
+      **Implementation**: `Check::Range` (inclusive `[min, max]`, either bound
+      optional, nulls skipped, NaN fails), `Check::OneOf` (allowed set, nulls
+      skipped) and `Check::Type` (column must have the given `DataType`).
+      Surfaced in Python as `ranges=` / `one_of=` / `types=` on `expect()`;
+      `NoNulls` pairs with them when nulls are also forbidden.
+- [x] Schema drift: `schema --save` and `schema --against` (non-zero exit on drift)
+      **Implementation**: `tptforge schema --save FILE` writes the inferred
+      schema as JSON; `--against FILE` returns a `DriftReport` and the CLI exits
+      with status 2 on drift. Both in `tpt-stream-cli/src/tools.rs`.
+- [x] `tptforge diff a b --key id` — streaming diff over the existing external
+      sort + merge join
+      **Implementation**: `tools::diff_command` sorts each side with core's
+      external `Sort` into a temp `.tptcol`, then does one merge pass; output is
+      CSV with a `_diff` column (`-`/`+`). Composite keys; duplicate keys and
+      key-type mismatches are errors. Caveat: `Sort::finish` returns its merged
+      output as one `Vec`, so peak memory is one sorted copy per input.
+- [x] Deterministic keyed sampling stage (reuse `hash_key`)
+      **Implementation**: `tpt-stream-core/src/sample.rs`. Keeps a row when a
+      hash of `(seed, key columns)` lands below `fraction`, so it is
+      reproducible, consistent per key (sampling on `customer_id` keeps whole
+      customers) and stateless. The hash is a fixed FNV-1a + SplitMix64
+      finaliser rather than `DefaultHasher`, whose algorithm is **not** stable
+      across Rust releases; it reuses `agg::hash_values` and takes the top 53
+      bits so the result is exactly representable in an `f64`.
+- [x] `--manifest` provenance JSON (counts, stage stats, input/spec hashes)
+      **Implementation**: `tpt-stream-cli/src/manifest.rs` — streamed SHA-256
+      of each input (64 KiB blocks), the spec hash, per-stage `StageMetrics`
+      and an RFC 3339 UTC timestamp. The spec is hashed as the **raw** file
+      bytes, i.e. before `${VAR}` substitution, so a manifest never contains
+      (or depends on) a secret.
 - [ ] Checkpoint/resume for stateless pipelines only — **needs explicit approval**
       (checkpointing is listed above as "not planned")

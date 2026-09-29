@@ -68,6 +68,20 @@
 #define TPT_AGG_MAX 5
 
 /**
+ * Opaque pipeline handle (`tpt_pipeline_new` / `tpt_pipeline_free`). Its
+ * layout is private; C sees only a forward-declared struct, so a batch
+ * handle cannot be passed where a pipeline is expected without a compiler
+ * diagnostic.
+ */
+typedef struct TptPipeline TptPipeline;
+
+/**
+ * Opaque record-batch handle (`tpt_record_batch_read` /
+ * `tpt_record_batch_free`). Layout is private; see [`TptPipeline`].
+ */
+typedef struct TptRecordBatch TptRecordBatch;
+
+/**
  * Aggregation spec passed to `tpt_pipeline_aggregate`.
  */
 typedef struct TptAggSpec {
@@ -106,7 +120,7 @@ int tpt_last_error_code(void);
  * # Safety
  * `out` must be a valid non-null pointer.
  */
-int tpt_pipeline_new(void **out);
+int tpt_pipeline_new(struct TptPipeline **out);
 
 /**
  * Release a pipeline created by `tpt_pipeline_new`. Safe to call with NULL.
@@ -114,7 +128,7 @@ int tpt_pipeline_new(void **out);
  * # Safety
  * `pipeline` must be a non-null handle from `tpt_pipeline_new` (or NULL).
  */
-void tpt_pipeline_free(void *pipeline);
+void tpt_pipeline_free(struct TptPipeline *pipeline);
 
 /**
  * `path` must be NUL-terminated. `chunk_rows == 0` uses the engine default.
@@ -122,7 +136,7 @@ void tpt_pipeline_free(void *pipeline);
  * # Safety
  * `pipeline` must be a pipeline handle; `path` a valid C string.
  */
-int tpt_pipeline_read_csv(void *pipeline, const char *path, uintptr_t chunk_rows);
+int tpt_pipeline_read_csv(struct TptPipeline *pipeline, const char *path, uintptr_t chunk_rows);
 
 /**
  * Add a filter stage from an expression string (see `tpt_stream_core::expr`).
@@ -131,7 +145,7 @@ int tpt_pipeline_read_csv(void *pipeline, const char *path, uintptr_t chunk_rows
  * # Safety
  * `pipeline` must be a pipeline handle; `expr` a valid C string.
  */
-int tpt_pipeline_filter(void *pipeline, const char *expr);
+int tpt_pipeline_filter(struct TptPipeline *pipeline, const char *expr);
 
 /**
  * Add a map stage. `columns` and `exprs` are parallel arrays of C strings,
@@ -141,7 +155,7 @@ int tpt_pipeline_filter(void *pipeline, const char *expr);
  * `pipeline` must be a pipeline handle; `columns`/`exprs` arrays of `count`
  * valid C strings.
  */
-int tpt_pipeline_map(void *pipeline,
+int tpt_pipeline_map(struct TptPipeline *pipeline,
                      const char *const *columns,
                      const char *const *exprs,
                      uintptr_t count);
@@ -153,7 +167,7 @@ int tpt_pipeline_map(void *pipeline,
  * `group_by` is an array of `group_n` valid C strings; `specs` an array of
  * `spec_n` `TptAggSpec`.
  */
-int tpt_pipeline_aggregate(void *pipeline,
+int tpt_pipeline_aggregate(struct TptPipeline *pipeline,
                            const char *const *group_by,
                            uintptr_t group_n,
                            const struct TptAggSpec *specs,
@@ -166,7 +180,10 @@ int tpt_pipeline_aggregate(void *pipeline,
  * # Safety
  * `columns` must be `count` valid C strings.
  */
-int tpt_pipeline_sort(void *pipeline, const char *const *columns, uintptr_t count, int descending);
+int tpt_pipeline_sort(struct TptPipeline *pipeline,
+                      const char *const *columns,
+                      uintptr_t count,
+                      int descending);
 
 /**
  * Attach a CSV sink.
@@ -174,7 +191,7 @@ int tpt_pipeline_sort(void *pipeline, const char *const *columns, uintptr_t coun
  * # Safety
  * `pipeline` must be a pipeline handle; `path` a valid C string.
  */
-int tpt_pipeline_write_csv(void *pipeline, const char *path);
+int tpt_pipeline_write_csv(struct TptPipeline *pipeline, const char *path);
 
 /**
  * Run the pipeline. `rows_out` receives the number of source rows processed.
@@ -182,7 +199,7 @@ int tpt_pipeline_write_csv(void *pipeline, const char *path);
  * # Safety
  * `pipeline` must be a pipeline handle; `rows_out` a valid pointer or NULL.
  */
-int tpt_pipeline_execute(void *pipeline, uint64_t *rows_out);
+int tpt_pipeline_execute(struct TptPipeline *pipeline, uint64_t *rows_out);
 
 /**
  * Read the first batch of a `.tptcol` file into a new batch handle.
@@ -190,7 +207,7 @@ int tpt_pipeline_execute(void *pipeline, uint64_t *rows_out);
  * # Safety
  * `path` must be a valid C string; `*out` receives an owned handle.
  */
-int tpt_record_batch_read(const char *path, void **out);
+int tpt_record_batch_read(const char *path, struct TptRecordBatch **out);
 
 /**
  * Release a batch handle created by `tpt_record_batch_read`.
@@ -198,7 +215,7 @@ int tpt_record_batch_read(const char *path, void **out);
  * # Safety
  * `batch` must be a non-null handle from `tpt_record_batch_read` (or NULL).
  */
-void tpt_record_batch_free(void *batch);
+void tpt_record_batch_free(struct TptRecordBatch *batch);
 
 /**
  * Number of rows in a batch handle.
@@ -206,7 +223,7 @@ void tpt_record_batch_free(void *batch);
  * # Safety
  * `batch` must be a batch handle or NULL (returns 0).
  */
-uint64_t tpt_record_batch_num_rows(const void *batch);
+uint64_t tpt_record_batch_num_rows(const struct TptRecordBatch *batch);
 
 /**
  * Number of columns in a batch handle.
@@ -214,7 +231,7 @@ uint64_t tpt_record_batch_num_rows(const void *batch);
  * # Safety
  * `batch` must be a batch handle or NULL (returns 0).
  */
-uint64_t tpt_record_batch_num_columns(const void *batch);
+uint64_t tpt_record_batch_num_columns(const struct TptRecordBatch *batch);
 
 /**
  * Write column `column`'s name into `buffer` (NUL-terminated). On success
@@ -223,7 +240,7 @@ uint64_t tpt_record_batch_num_columns(const void *batch);
  * # Safety
  * `batch` must be a batch handle; `buffer` writable for `capacity` bytes.
  */
-int tpt_record_batch_get_column(const void *batch,
+int tpt_record_batch_get_column(const struct TptRecordBatch *batch,
                                 uintptr_t column,
                                 char *buffer,
                                 uintptr_t capacity,
@@ -237,7 +254,7 @@ int tpt_record_batch_get_column(const void *batch,
  * # Safety
  * `batch` must be a batch handle; `buffer` writable for `capacity` bytes.
  */
-int tpt_record_batch_get_cell(const void *batch,
+int tpt_record_batch_get_cell(const struct TptRecordBatch *batch,
                               uintptr_t row,
                               uintptr_t column,
                               char *buffer,
