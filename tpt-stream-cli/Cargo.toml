@@ -37,7 +37,7 @@ serde_json = { workspace = true }
 sha2 = "0.11"
 tempfile = "3"
 clap_complete = "4"
-clap_mangen = "0.2"
+clap_mangen = "0.3"
 
 # `cargo binstall tpt-stream-cli` downloads the prebuilt archive from the GitHub
 # release (see .github/workflows/release.yml) instead of compiling.
