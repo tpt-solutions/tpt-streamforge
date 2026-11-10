@@ -43,7 +43,7 @@ tracing = { version = "0.1", optional = true }
 # Azure Blob Shared Key signing (feature `azure`).
 hmac = { version = "0.13", optional = true }
 sha2 = { version = "0.11", optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 
 [features]
 default = ["async"]
