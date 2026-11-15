@@ -21,7 +21,7 @@ async-trait = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 thiserror.workspace = true
 tpt-stream-columnar = { path = "../tpt-stream-columnar", version = "0.1.0" }
-rusqlite = { version = "0.40", features = ["bundled", "column_decltype"], optional = true }
+rusqlite = { version = "0.42", features = ["bundled", "column_decltype"], optional = true }
 tokio-postgres = { version = "0.7", optional = true }
 bytes = { version = "1", optional = true }
 futures-util = { workspace = true, optional = true }
