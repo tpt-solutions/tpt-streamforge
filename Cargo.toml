@@ -27,7 +27,7 @@ anyhow = "1"
 zstd = "0.14"
 rayon = "1"
 thiserror = "2"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 futures-util = "0.3"
 
 [profile.release]
